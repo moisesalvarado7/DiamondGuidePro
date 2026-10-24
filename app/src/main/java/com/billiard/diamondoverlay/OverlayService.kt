@@ -255,7 +255,18 @@ class OverlayService : Service() {
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .build()
         } else Notification()
-        startForeground(1, notification)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            startForeground(1, notification, type)
+        } else {
+            startForeground(1, notification)
+        }
     }
 
     override fun onDestroy() {

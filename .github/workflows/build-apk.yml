@@ -20,9 +20,11 @@ jobs:
 
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.6"
 
       - name: Compilar APK Debug
-        run: gradle assembleDebug
+        run: gradle assembleDebug --no-daemon
 
       - name: Subir APK listo para instalar
         uses: actions/upload-artifact@v4
