@@ -17,7 +17,7 @@ import android.util.DisplayMetrics
 import android.view.*
 import android.widget.Button
 import android.widget.LinearLayout
-import kotlin.math.*
+import android.widget.Toast
 
 class OverlayService : Service() {
 
@@ -34,19 +34,34 @@ class OverlayService : Service() {
     private var screenHeight = 1260
     private var screenDensity = 480
 
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            virtualDisplay?.release()
+            virtualDisplay = null
+            imageReader?.close()
+            imageReader = null
+            mediaProjection = null
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundNotification()
         setupDisplayMetrics()
 
+        // 1. Iniciar las vistas superpuestas SIEMPRE primero para garantizar que se muestren
+        if (!::billiardCanvasView.isInitialized) {
+            setupOverlays()
+        }
+
+        // 2. Configurar captura de pantalla de forma segura para Android 14
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data: Intent? = intent?.getParcelableExtra("DATA")
         if (resultCode == Activity.RESULT_OK && data != null) {
             setupMediaProjection(resultCode, data)
         }
 
-        setupOverlays()
         return START_STICKY
     }
 
@@ -60,15 +75,23 @@ class OverlayService : Service() {
     }
 
     private fun setupMediaProjection(resultCode: Int, data: Intent) {
-        val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mpManager.getMediaProjection(resultCode, data)
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "BilliardScanner",
-            screenWidth, screenHeight, screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface, null, null
-        )
+        try {
+            val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = mpManager.getMediaProjection(resultCode, data)
+
+            // En Android 14 (API 34) es OBLIGATORIO registrar el Callback antes de createVirtualDisplay
+            mediaProjection?.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
+
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "BilliardScanner",
+                screenWidth, screenHeight, screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface, null, null
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun setupOverlays() {
@@ -76,19 +99,26 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else WindowManager.LayoutParams.TYPE_PHONE
 
-        // 1. Lienzo a pantalla completa
+        // 1. Lienzo a pantalla completa con las guías de diamantes
+        // Inicia en modo passthrough (FLAG_NOT_TOUCHABLE) para no interferir con el juego
         billiardCanvasView = BilliardCanvasView(this)
         canvasParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             overlayType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        )
+        ).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         windowManager.addView(billiardCanvasView, canvasParams)
 
-        // 2. Barra de control flotante (siempre clickeable)
+        // 2. Barra flotante con controles rápidos
         controlBar = createControlBar()
         controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -98,7 +128,7 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 40
+            x = 60
             y = 40
         }
         windowManager.addView(controlBar, controlParams)
@@ -107,14 +137,16 @@ class OverlayService : Service() {
     private fun createControlBar(): LinearLayout {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.argb(210, 18, 24, 36))
-            setPadding(16, 10, 16, 10)
+            setBackgroundColor(Color.argb(220, 18, 24, 36))
+            setPadding(12, 8, 12, 8)
         }
 
-        // Botón para arrastrar la barra flotante
+        // Botón para mover la barra flotante con el dedo
         val btnMove = Button(this).apply {
             text = "✥"
-            textSize = 12f
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.TRANSPARENT)
             setOnTouchListener(object : View.OnTouchListener {
                 var initX = 0; var initY = 0; var touchX = 0f; var touchY = 0f
                 override fun onTouch(v: View, e: MotionEvent): Boolean {
@@ -134,71 +166,84 @@ class OverlayService : Service() {
             })
         }
 
-        // Botón 1: Ajustar esquinas de la mesa
+        // Botón 1: Alternar Cuadrícula de Guías de Diamantes (Imágenes 3 y 4)
+        val btnGrid = Button(this).apply {
+            text = "💎 Guías: TODAS"
+            textSize = 10f
+            setTextColor(Color.CYAN)
+            setBackgroundColor(Color.argb(120, 0, 0, 0))
+            setOnClickListener {
+                billiardCanvasView.gridFilter = when (billiardCanvasView.gridFilter) {
+                    BilliardCanvasView.GridFilter.ALL -> {
+                        text = "💎 Guías: CLAVE"
+                        BilliardCanvasView.GridFilter.MAIN_ANGLES
+                    }
+                    BilliardCanvasView.GridFilter.MAIN_ANGLES -> {
+                        text = "💎 Guías: OFF"
+                        BilliardCanvasView.GridFilter.OFF
+                    }
+                    BilliardCanvasView.GridFilter.OFF -> {
+                        text = "💎 Guías: TODAS"
+                        BilliardCanvasView.GridFilter.ALL
+                    }
+                }
+                billiardCanvasView.invalidate()
+            }
+        }
+
+        // Botón 2: Calibrar esquinas de la mesa
         val btnResize = Button(this).apply {
             text = "📐 Mesa"
-            textSize = 11f
+            textSize = 10f
+            setTextColor(Color.YELLOW)
+            setBackgroundColor(Color.argb(120, 0, 0, 0))
             setOnClickListener {
                 setCanvasTouchable(true)
                 billiardCanvasView.mode = BilliardCanvasView.Mode.ADJUST_TABLE
                 billiardCanvasView.invalidate()
+                Toast.makeText(this@OverlayService, "Arrastra las esquinas de color a las troneras de tu juego", Toast.LENGTH_SHORT).show()
             }
         }
 
-        // Botón 2: Mover Bolas Manualmente
-        val btnBalls = Button(this).apply {
-            text = "🎱 Bolas"
-            textSize = 11f
+        // Botón 3: Modo Jugar (Lienzo passthrough para disparar en 8 Ball Pool)
+        val btnPlay = Button(this).apply {
+            text = "🎮 Jugar"
+            textSize = 10f
+            setTextColor(Color.parseColor("#00E676"))
+            setBackgroundColor(Color.argb(120, 0, 0, 0))
             setOnClickListener {
-                setCanvasTouchable(true)
-                billiardCanvasView.mode = BilliardCanvasView.Mode.MOVE_BALLS
+                setCanvasTouchable(false)
+                billiardCanvasView.mode = BilliardCanvasView.Mode.LOCKED_PLAY
+                billiardCanvasView.saveTableRect()
                 billiardCanvasView.invalidate()
+                Toast.makeText(this@OverlayService, "Guías fijadas. ¡Puedes disparar en tu juego!", Toast.LENGTH_SHORT).show()
             }
         }
 
-        // Botón 3: Escaneo Automático de Bola Blanca
+        // Botón 4: Escaneo automático de bola blanca si la captura está activa
         val btnAutoScan = Button(this).apply {
-            text = "👁️ Auto-Blanca"
-            textSize = 11f
-            setBackgroundColor(Color.parseColor("#00E676"))
-            setTextColor(Color.BLACK)
+            text = "👁️ Auto"
+            textSize = 10f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(120, 0, 0, 0))
             setOnClickListener { scanScreenForCueBall() }
         }
 
-        // Botón 4: Modo Juego (Passthrough para disparar en el juego de abajo)
-        val btnPlay = Button(this).apply {
-            text = "🎮 Jugar (Tocar Abajo)"
+        // Botón 5: Cerrar Overlay
+        val btnClose = Button(this).apply {
+            text = "✕"
             textSize = 11f
-            setOnClickListener {
-                val isLocked = (canvasParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
-                if (isLocked) {
-                    setCanvasTouchable(true)
-                    text = "🎮 Jugar (Tocar Abajo)"
-                } else {
-                    setCanvasTouchable(false)
-                    billiardCanvasView.mode = BilliardCanvasView.Mode.LOCKED_PLAY
-                    billiardCanvasView.invalidate()
-                    text = "🔒 Desbloquear Guía"
-                }
-            }
-        }
-
-        // Botón 5: Alternar Líneas de Diamantes (3 Bandas vs Tiro Directo)
-        val btnDiamonds = Button(this).apply {
-            text = "💎 3 Bandas"
-            textSize = 11f
-            setOnClickListener {
-                billiardCanvasView.showThreeCushion = !billiardCanvasView.showThreeCushion
-                billiardCanvasView.invalidate()
-            }
+            setTextColor(Color.RED)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener { stopSelf() }
         }
 
         bar.addView(btnMove)
+        bar.addView(btnGrid)
         bar.addView(btnResize)
-        bar.addView(btnBalls)
-        bar.addView(btnAutoScan)
-        bar.addView(btnDiamonds)
         bar.addView(btnPlay)
+        bar.addView(btnAutoScan)
+        bar.addView(btnClose)
         return bar
     }
 
@@ -211,47 +256,53 @@ class OverlayService : Service() {
         windowManager.updateViewLayout(billiardCanvasView, canvasParams)
     }
 
-    /**
-     * Escanea los píxeles dentro del rectángulo de la mesa para detectar automáticamente
-     * el centroide del círculo más blanco y brillante (Bola Blanca).
-     */
     private fun scanScreenForCueBall() {
-        billiardCanvasView.visibility = View.INVISIBLE // Ocultar 50ms para leer pantalla limpia
+        if (imageReader == null || mediaProjection == null) {
+            Toast.makeText(this, "Captura no iniciada. Las guías de diamantes siguen activas.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        billiardCanvasView.visibility = View.INVISIBLE
         Handler(Looper.getMainLooper()).postDelayed({
-            val image = imageReader?.acquireLatestImage()
-            if (image != null) {
-                val planes = image.planes
-                val buffer = planes[0].buffer
-                val pixelStride = planes[0].pixelStride
-                val rowStride = planes[0].rowStride
-                val rowPadding = rowStride - pixelStride * image.width
+            try {
+                val image = imageReader?.acquireLatestImage()
+                if (image != null) {
+                    val planes = image.planes
+                    val buffer = planes[0].buffer
+                    val pixelStride = planes[0].pixelStride
+                    val rowStride = planes[0].rowStride
+                    val rowPadding = rowStride - pixelStride * image.width
 
-                val bitmap = Bitmap.createBitmap(
-                    image.width + rowPadding / pixelStride,
-                    image.height,
-                    Bitmap.Config.ARGB_8888
-                )
-                bitmap.copyPixelsFromBuffer(buffer)
-                image.close()
+                    val bitmap = Bitmap.createBitmap(
+                        image.width + rowPadding / pixelStride,
+                        image.height,
+                        Bitmap.Config.ARGB_8888
+                    )
+                    bitmap.copyPixelsFromBuffer(buffer)
+                    image.close()
 
-                billiardCanvasView.detectCueBallFromBitmap(bitmap)
-                bitmap.recycle()
+                    billiardCanvasView.detectCueBallFromBitmap(bitmap)
+                    bitmap.recycle()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                billiardCanvasView.visibility = View.VISIBLE
+                billiardCanvasView.invalidate()
             }
-            billiardCanvasView.visibility = View.VISIBLE
-            billiardCanvasView.invalidate()
         }, 60)
     }
 
     private fun startForegroundNotification() {
         val channelId = "billiard_overlay_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Billiard Overlay", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(channelId, "Diamond Guide Overlay", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, channelId)
-                .setContentTitle("Diamond Guide Pro Activo")
-                .setContentText("Lienzo superpuesto ejecutándose en tu Honor 400 Pro")
+                .setContentTitle("Diamond Guide Pro")
+                .setContentText("Guías de diamantes activas sobre tu juego")
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .build()
         } else Notification()
@@ -271,9 +322,14 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::billiardCanvasView.isInitialized) windowManager.removeView(billiardCanvasView)
-        if (::controlBar.isInitialized) windowManager.removeView(controlBar)
+        if (::billiardCanvasView.isInitialized) {
+            windowManager.removeView(billiardCanvasView)
+        }
+        if (::controlBar.isInitialized) {
+            windowManager.removeView(controlBar)
+        }
         virtualDisplay?.release()
+        imageReader?.close()
         mediaProjection?.stop()
     }
 }
