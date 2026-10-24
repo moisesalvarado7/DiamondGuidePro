@@ -305,6 +305,21 @@ class OverlayService : Service() {
             }
         }
 
+        // Botón Calibración rápida del tamaño de la bola
+        val btnCalib = Button(this).apply {
+            text = "📏 ${billiardCanvasView.ballRadius.toInt()}"
+            textSize = 10f
+            setTextColor(Color.WHITE)
+            background = createButtonDrawable(Color.argb(160, 45, 55, 75))
+            layoutParams = btnParams
+            setPadding(dpToPx(6), 0, dpToPx(6), 0)
+            setOnClickListener {
+                val newR = billiardCanvasView.cycleBallRadius()
+                text = "📏 ${newR.toInt()}"
+                Toast.makeText(this@OverlayService, "Calibración de bola: ${newR.toInt()}px", Toast.LENGTH_SHORT).show()
+            }
+        }
+
         // Botón 4: JUGAR (Bloquea el lienzo y colapsa la barra a la burbuja para que no estorbe)
         val btnPlay = Button(this).apply {
             text = "🎮 Jugar"
@@ -362,6 +377,7 @@ class OverlayService : Service() {
         expandedBar.addView(btnAim)
         expandedBar.addView(btnGrid)
         expandedBar.addView(btnResize)
+        expandedBar.addView(btnCalib)
         expandedBar.addView(btnPlay)
         expandedBar.addView(btnAutoScan)
         expandedBar.addView(btnMinimize)
