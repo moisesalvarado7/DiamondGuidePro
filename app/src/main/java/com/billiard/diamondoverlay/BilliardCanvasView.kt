@@ -20,6 +20,12 @@ class BilliardCanvasView(context: Context) : View(context) {
         val angleDeg: Float
     )
 
+    data class RayHit(
+        val point: PointF,
+        val cushionSide: CushionSide,
+        val pocketIndex: Int = -1
+    )
+
     var mode = Mode.LOCKED_PLAY
     var gridFilter = GridFilter.MAIN_ANGLES
     var showAimLine = true
