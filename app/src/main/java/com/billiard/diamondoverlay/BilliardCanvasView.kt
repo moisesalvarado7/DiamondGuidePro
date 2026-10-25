@@ -27,9 +27,9 @@ class BilliardCanvasView(context: Context) : View(context) {
     )
 
     var mode = Mode.LOCKED_PLAY
-    var gridFilter = GridFilter.MAIN_ANGLES
+    var gridFilter = GridFilter.OFF // Inicialmente OFF o sutil para que las líneas de tiro resalten limpias
     var showAimLine = true
-    var gridAlpha = 175
+    var gridAlpha = 80              // Sutil para no estorbar la decisión de tiro
 
     // Rectángulo del tapete de la mesa
     var tableRect = RectF(260f, 220f, 2180f, 1180f)
@@ -37,6 +37,10 @@ class BilliardCanvasView(context: Context) : View(context) {
     var targetBall = PointF(1550f, 520f)  // Bola Objetivo
     var ballRadius = 25f                  // Radio calibrable de la bola (22..30px)
     var selectedPocketIndex = -1          // -1 = auto-detectar mejor buchaca, 0..5 = buchaca fijada
+
+    // Lista de todas las bolas detectadas en la mesa por visión artificial
+    val detectedBalls = mutableListOf<PointF>()
+    var aimAngle = 0f                     // Ángulo de puntería detectado (en radianes)
 
     private var activeDragItem = -1 // 0..3=Esquinas, 4=Blanca, 5=Objetivo
     private val prefs = context.getSharedPreferences("diamond_guide_prefs", Context.MODE_PRIVATE)
@@ -55,7 +59,7 @@ class BilliardCanvasView(context: Context) : View(context) {
     // Pinceles de dibujo
     private val paintLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 2.0f
+        strokeWidth = 1.5f
     }
     private val paintTableBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#4E342E")
@@ -63,9 +67,9 @@ class BilliardCanvasView(context: Context) : View(context) {
         strokeWidth = 14f
     }
     private val paintTableInnerRim = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(180, 0, 229, 255)
+        color = Color.argb(160, 0, 229, 255)
         style = Paint.Style.STROKE
-        strokeWidth = 3f
+        strokeWidth = 2.5f
     }
     private val paintPocket = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#121212")
@@ -74,7 +78,7 @@ class BilliardCanvasView(context: Context) : View(context) {
     private val paintPocketRim = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#333333")
         style = Paint.Style.STROKE
-        strokeWidth = 3.5f
+        strokeWidth = 3f
     }
     private val paintDiamondDot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -94,41 +98,47 @@ class BilliardCanvasView(context: Context) : View(context) {
         setShadowLayer(6f, 2f, 2f, Color.BLACK)
     }
 
-    // Pinceles para la Línea de Puntería Calibrada y Buchacas
-    private val paintCueShot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    // Pinceles inspirados en la foto de referencia (líneas blancas de rebote continuo y objetivo a buchaca)
+    private val paintCueTrajectory = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.STROKE
-        strokeWidth = 3.8f
+        strokeWidth = 3.6f
+        setShadowLayer(6f, 0f, 0f, Color.parseColor("#80D8FF"))
+    }
+    private val paintBounceDot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
         setShadowLayer(6f, 0f, 0f, Color.parseColor("#80D8FF"))
     }
     private val paintGhostBall = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(220, 255, 255, 255)
+        color = Color.WHITE
         style = Paint.Style.STROKE
         strokeWidth = 3.0f
-        pathEffect = DashPathEffect(floatArrayOf(10f, 8f), 0f)
+        setShadowLayer(6f, 0f, 0f, Color.WHITE)
     }
-    private val paintTargetDirectPot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00E676") // Verde neón brillante para tiro a buchaca
+    private val paintTargetPotLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00E676") // Verde brillante / amarillo como en la foto
         style = Paint.Style.STROKE
-        strokeWidth = 5.0f
+        strokeWidth = 4.8f
         setShadowLayer(10f, 0f, 0f, Color.parseColor("#00E676"))
     }
-    private val paintTargetBankShot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val paintTargetBankLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#FFD600") // Dorado ámbar para rebotes a buchaca
         style = Paint.Style.STROKE
         strokeWidth = 4.5f
         setShadowLayer(8f, 0f, 0f, Color.parseColor("#FFAB00"))
     }
-    private val paintPocketHalo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val paintPocketRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00E676")
         style = Paint.Style.STROKE
-        strokeWidth = 6.0f
-        setShadowLayer(14f, 0f, 0f, Color.parseColor("#00E676"))
+        strokeWidth = 5.0f
+        setShadowLayer(12f, 0f, 0f, Color.parseColor("#00E676"))
     }
-    private val paintDeflection = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(160, 225, 245, 254)
+    private val paintDetectedBall = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(120, 255, 255, 255)
         style = Paint.Style.STROKE
-        strokeWidth = 2.5f
-        pathEffect = DashPathEffect(floatArrayOf(8f, 8f), 0f)
+        strokeWidth = 2.0f
+        pathEffect = DashPathEffect(floatArrayOf(6f, 6f), 0f)
     }
 
     init {
@@ -242,21 +252,21 @@ class BilliardCanvasView(context: Context) : View(context) {
 
     private fun getColorForSlope(redDx: Int, redDy: Int, angleDeg: Float): Int {
         return when {
-            redDx == 0 -> Color.rgb(225, 230, 240)       // 90° Vertical
-            redDy == 0 -> Color.rgb(210, 215, 225)       // 0° Horizontal
-            redDx == 1 && redDy == 1 -> Color.rgb(255, 235, 59)  // 1:1 (45°)
-            redDx == 2 && redDy == 1 -> Color.rgb(0, 230, 118)   // 1:2 (26.6°)
-            redDx == 1 && redDy == 2 -> Color.rgb(0, 229, 255)   // 2:1 (63.4°)
-            redDx == 3 && redDy == 1 -> Color.rgb(255, 64, 129)  // 1:3 (18.4°)
-            redDx == 1 && redDy == 3 -> Color.rgb(224, 64, 251)  // 3:1 (71.6°)
-            redDx == 4 && redDy == 1 -> Color.rgb(255, 171, 0)   // 1:4 (14.0°)
-            redDx == 1 && redDy == 4 -> Color.rgb(255, 82, 82)   // 4:1 (76.0°)
-            redDx == 3 && redDy == 2 -> Color.rgb(118, 255, 3)   // 2:3 (33.7°)
-            redDx == 2 && redDy == 3 -> Color.rgb(64, 196, 255)  // 3:2 (56.3°)
-            redDx == 4 && redDy == 3 -> Color.rgb(255, 138, 101) // 3:4 (36.9°)
-            redDx == 3 && redDy == 4 -> Color.rgb(179, 136, 255) // 4:3 (53.1°)
-            redDx == 5 && redDy == 4 -> Color.rgb(38, 198, 218)  // 4:5 (38.7°)
-            redDx == 7 && redDy == 4 -> Color.rgb(240, 98, 146)  // 4:7 (29.7°)
+            redDx == 0 -> Color.rgb(225, 230, 240)
+            redDy == 0 -> Color.rgb(210, 215, 225)
+            redDx == 1 && redDy == 1 -> Color.rgb(255, 235, 59)
+            redDx == 2 && redDy == 1 -> Color.rgb(0, 230, 118)
+            redDx == 1 && redDy == 2 -> Color.rgb(0, 229, 255)
+            redDx == 3 && redDy == 1 -> Color.rgb(255, 64, 129)
+            redDx == 1 && redDy == 3 -> Color.rgb(224, 64, 251)
+            redDx == 4 && redDy == 1 -> Color.rgb(255, 171, 0)
+            redDx == 1 && redDy == 4 -> Color.rgb(255, 82, 82)
+            redDx == 3 && redDy == 2 -> Color.rgb(118, 255, 3)
+            redDx == 2 && redDy == 3 -> Color.rgb(64, 196, 255)
+            redDx == 4 && redDy == 3 -> Color.rgb(255, 138, 101)
+            redDx == 3 && redDy == 4 -> Color.rgb(179, 136, 255)
+            redDx == 5 && redDy == 4 -> Color.rgb(38, 198, 218)
+            redDx == 7 && redDy == 4 -> Color.rgb(240, 98, 146)
             else -> {
                 val hue = (angleDeg * 5.7f) % 360f
                 Color.HSVToColor(floatArrayOf(hue, 0.82f, 0.95f))
@@ -265,20 +275,19 @@ class BilliardCanvasView(context: Context) : View(context) {
     }
 
     /**
-     * Devuelve los centros de caída (drop centers) calibrados de las 6 buchacas.
-     * Tienen un inset hacia adentro para que la bola entre por la boca limpia sin golpear las muelas de la banda.
+     * Centros de caída de las buchacas calibrados con inset para evitar las muelas de la banda.
      */
     fun getPocketsList(): List<PointF> {
         val cx = tableRect.centerX()
         val cornerInset = ballRadius * 0.95f
         val sideInset = ballRadius * 0.35f
         return listOf(
-            PointF(tableRect.left + cornerInset, tableRect.top + cornerInset),       // 0: Corner Top-Left
-            PointF(cx, tableRect.top + sideInset),                                   // 1: Center Top
-            PointF(tableRect.right - cornerInset, tableRect.top + cornerInset),      // 2: Corner Top-Right
-            PointF(tableRect.left + cornerInset, tableRect.bottom - cornerInset),    // 3: Corner Bottom-Left
-            PointF(cx, tableRect.bottom - sideInset),                                // 4: Center Bottom
-            PointF(tableRect.right - cornerInset, tableRect.bottom - cornerInset)    // 5: Corner Bottom-Right
+            PointF(tableRect.left + cornerInset, tableRect.top + cornerInset),       // 0: Sup Izq
+            PointF(cx, tableRect.top + sideInset),                                   // 1: Centro Sup
+            PointF(tableRect.right - cornerInset, tableRect.top + cornerInset),      // 2: Sup Der
+            PointF(tableRect.left + cornerInset, tableRect.bottom - cornerInset),    // 3: Inf Izq
+            PointF(cx, tableRect.bottom - sideInset),                                // 4: Centro Inf
+            PointF(tableRect.right - cornerInset, tableRect.bottom - cornerInset)    // 5: Inf Der
         )
     }
 
@@ -292,7 +301,7 @@ class BilliardCanvasView(context: Context) : View(context) {
         // 2. Las 6 Buchacas visuales
         drawPockets(canvas)
 
-        // 3. Cuadrícula de Diamantes por Ángulo (Imágenes 3 y 4)
+        // 3. Cuadrícula de diamantes de fondo (si el usuario la activa)
         if (gridFilter != GridFilter.OFF) {
             drawDiamondGridLines(canvas)
         }
@@ -300,17 +309,25 @@ class BilliardCanvasView(context: Context) : View(context) {
         // 4. Marcadores y números de diamantes (0..8 y 0..4)
         drawDiamondsAndLabels(canvas)
 
-        // 5. LÍNEAS DE REFERENCIA CALIBRADAS (Tiro Directo a Buchaca + Rebotes en Banda a Buchaca)
-        if (showAimLine) {
-            drawSmartAimAndBankGuidance(canvas)
+        // 5. Círculos de todas las demás bolas detectadas en la mesa
+        for (b in detectedBalls) {
+            if (hypot((b.x - cueBall.x).toDouble(), (b.y - cueBall.y).toDouble()) > ballRadius * 1.5f &&
+                hypot((b.x - targetBall.x).toDouble(), (b.y - targetBall.y).toDouble()) > ballRadius * 1.5f) {
+                canvas.drawCircle(b.x, b.y, ballRadius, paintDetectedBall)
+            }
         }
 
-        // 6. Si estamos ajustando mesa, dibujar manejadores en las esquinas
+        // 6. LÍNEAS DE REFERENCIA EXTENDIDAS MULTI-BANDA Y TIRO A BUCHACA (Como en la foto de referencia)
+        if (showAimLine) {
+            drawProMultiCushionTrajectory(canvas)
+        }
+
+        // 7. Modos de ajuste
         if (mode == Mode.ADJUST_TABLE) {
             drawAdjustmentHandles(canvas)
         } else if (mode == Mode.TARGET_AIM) {
             canvas.drawText(
-                "🎯 Toca una buchaca para tiro directo o en banda. Arrastra la bola para ubicarla.",
+                "🎯 Auto-detección activa. Puedes tocar una bola o buchaca para fijarla.",
                 tableRect.left + 20f, tableRect.top - 40f, paintHint
             )
         }
@@ -371,19 +388,19 @@ class BilliardCanvasView(context: Context) : View(context) {
     }
 
     /**
-     * MOTOR DE PUNTERÍA INTELIGENTE CALIBRADO:
-     * 1. Resuelve el tiro directo perfecto hacia la buchaca mediante la Bola Fantasma física real.
-     * 2. SI LA GUÍA TOCA UNA BANDA: Calcula y extiende la guía en espejo para que SIEMPRE BUSQUE UNA BUCHACA.
+     * DIBUJA LA TRAYECTORIA MULTI-BANDA IDÉNTICA A LA FOTO DE REFERENCIA:
+     * 1. Traza desde la blanca hasta la Bola Fantasma en la bola objetivo.
+     * 2. Traza la bola objetivo directamente hasta la buchaca correspondiente con halo verde.
+     * 3. Traza la blanca tras el impacto en multi-banda continua (hasta 4 rebotes con puntos de impacto).
      */
-    private fun drawSmartAimAndBankGuidance(canvas: Canvas) {
+    private fun drawProMultiCushionTrajectory(canvas: Canvas) {
         val pockets = getPocketsList()
 
-        // 1. Determinar la buchaca objetivo: la elegida por el usuario o la que tenga el mejor corte físico
+        // 1. Determinar cuál buchaca es la mejor para la bola objetivo (o la seleccionada)
         var bestPocketIdx = selectedPocketIndex
         var bestCutAngle = 999f
 
         if (bestPocketIdx == -1) {
-            // Auto-detectar la buchaca con menor ángulo de corte (< 75°)
             for (i in pockets.indices) {
                 val p = pockets[i]
                 val potDx = p.x - targetBall.x
@@ -408,7 +425,7 @@ class BilliardCanvasView(context: Context) : View(context) {
                 val dot = (cueDirX * potDirX + cueDirY * potDirY).coerceIn(-1f, 1f)
                 val cutAngleDeg = Math.toDegrees(acos(dot.toDouble())).toFloat()
 
-                if (cutAngleDeg < bestCutAngle && cutAngleDeg <= 75f) {
+                if (cutAngleDeg < bestCutAngle && cutAngleDeg <= 78f) {
                     bestCutAngle = cutAngleDeg
                     bestPocketIdx = i
                 }
@@ -417,7 +434,7 @@ class BilliardCanvasView(context: Context) : View(context) {
 
         val directPocket = if (bestPocketIdx in 0..5) pockets[bestPocketIdx] else null
 
-        if (directPocket != null && (bestCutAngle <= 75f || selectedPocketIndex != -1)) {
+        if (directPocket != null) {
             // === TIRO DIRECTO A BUCHACA CON BOLA FANTASMA EXACTA ===
             val potDx = directPocket.x - targetBall.x
             val potDy = directPocket.y - targetBall.y
@@ -428,32 +445,92 @@ class BilliardCanvasView(context: Context) : View(context) {
             val ghostX = targetBall.x - potDirX * (ballRadius * 2f)
             val ghostY = targetBall.y - potDirY * (ballRadius * 2f)
 
-            // Línea del taco (Blanca a Bola Fantasma)
-            canvas.drawLine(cueBall.x, cueBall.y, ghostX, ghostY, paintCueShot)
+            // Línea 1: Desde la Bola Blanca hasta la Bola Fantasma
+            canvas.drawLine(cueBall.x, cueBall.y, ghostX, ghostY, paintCueTrajectory)
             canvas.drawCircle(ghostX, ghostY, ballRadius, paintGhostBall)
 
-            // Línea de la Bola Objetivo EXTENDIDA directamente al fondo de la Buchaca
-            canvas.drawLine(targetBall.x, targetBall.y, directPocket.x, directPocket.y, paintTargetDirectPot)
-            drawPocketHighlight(canvas, directPocket, bestPocketIdx, "★ ENTRA EN BUCHACA #${bestPocketIdx + 1}", true)
+            // Línea 2: Desde la Bola Objetivo EXTENDIDA hasta el fondo de la buchaca
+            canvas.drawLine(targetBall.x, targetBall.y, directPocket.x, directPocket.y, paintTargetPotLine)
+            drawPocketHighlight(canvas, directPocket, bestPocketIdx, "★ BUCHACA #${bestPocketIdx + 1}", true)
 
-            // Desvío de la blanca a 90 grados
-            val deflDirX = -potDirY
-            val deflDirY = potDirX
-            val cueDeflectHit = raycastCushion(PointF(ghostX, ghostY), deflDirX, deflDirY)
-            canvas.drawLine(ghostX, ghostY, cueDeflectHit.point.x, cueDeflectHit.point.y, paintDeflection)
+            // Línea 3: REBOTE MULTI-BANDA DE LA BLANCA TRAS EL IMPACTO (Regla de los 90° con hasta 4 bandas)
+            // Vector perpendicular de desvío
+            val cueDx = ghostX - cueBall.x
+            val cueDy = ghostY - cueBall.y
+            val cueDist = hypot(cueDx.toDouble(), cueDy.toDouble()).toFloat()
+            val cueDirX = if (cueDist > 0.1f) cueDx / cueDist else potDirX
+            val cueDirY = if (cueDist > 0.1f) cueDy / cueDist else potDirY
+
+            // Producto cruz para determinar hacia qué lado desvía la blanca
+            val cross = cueDirX * potDirY - cueDirY * potDirX
+            val tangentDirX = if (cross > 0) -potDirY else potDirY
+            val tangentDirY = if (cross > 0) potDirX else -potDirX
+
+            // Trazar multi-rebote continuo de la blanca (como en la foto de referencia)
+            val bouncePath = traceMultiCushionBounces(PointF(ghostX, ghostY), tangentDirX, tangentDirY, maxBounces = 4)
+            drawMultiBouncePath(canvas, bouncePath)
 
         } else {
-            // === SI NO HAY TIRO DIRECTO O APUNTA A BANDA: BUSCADOR DE REBOTE A BUCHACA ===
+            // === TIRO DE BANDA QUE BUSCA LA BUCHACA ===
             drawBankShotSeekingPocket(canvas, pockets)
         }
 
-        // 3. Dibujar las bolas con su tamaño calibrado
+        // Dibujar las bolas con su tamaño calibrado
         drawBalls(canvas)
     }
 
     /**
-     * CUANDO SE ENCUENTRA CON UNA BANDA: Extiende la guía calculando la reflexión en espejo
-     * para que SIEMPRE BUSQUE Y CONECTE DIRECTAMENTE CON UNA BUCHACA.
+     * Traza el rebote continuo a través de hasta 4 bandas consecutivas.
+     */
+    private fun traceMultiCushionBounces(startPos: PointF, initialDirX: Float, initialDirY: Float, maxBounces: Int = 4): List<PointF> {
+        val points = mutableListOf<PointF>()
+        points.add(PointF(startPos.x, startPos.y))
+
+        var curOrigin = PointF(startPos.x, startPos.y)
+        var curDirX = initialDirX
+        var curDirY = initialDirY
+
+        for (b in 0 until maxBounces) {
+            val hit = raycastCushion(curOrigin, curDirX, curDirY)
+            points.add(PointF(hit.point.x, hit.point.y))
+
+            // Si entra a una buchaca se detiene
+            if (hit.pocketIndex != -1) break
+
+            // Reflejar vector de dirección en la banda
+            curDirX = if (hit.cushionSide == CushionSide.LEFT || hit.cushionSide == CushionSide.RIGHT) -curDirX else curDirX
+            curDirY = if (hit.cushionSide == CushionSide.TOP || hit.cushionSide == CushionSide.BOTTOM) -curDirY else curDirY
+            curOrigin = PointF(hit.point.x, hit.point.y)
+        }
+
+        return points
+    }
+
+    /**
+     * Dibuja la polilínea blanca continua de multi-banda con pequeños círculos en cada impacto de banda
+     * exactamente idéntico al screenshot de TikTok de referencia.
+     */
+    private fun drawMultiBouncePath(canvas: Canvas, path: List<PointF>) {
+        if (path.size < 2) return
+
+        for (i in 0 until path.size - 1) {
+            val p1 = path[i]
+            val p2 = path[i + 1]
+            canvas.drawLine(p1.x, p1.y, p2.x, p2.y, paintCueTrajectory)
+
+            // Círculo blanco en cada punto de rebote en la banda
+            if (i > 0) {
+                canvas.drawCircle(p1.x, p1.y, 6f, paintBounceDot)
+            }
+        }
+
+        // Círculo final donde termina la bola blanca
+        val lastPoint = path.last()
+        canvas.drawCircle(lastPoint.x, lastPoint.y, ballRadius, paintGhostBall)
+    }
+
+    /**
+     * Calcula la línea de rebote en banda que busca analíticamente la buchaca.
      */
     private fun drawBankShotSeekingPocket(canvas: Canvas, pockets: List<PointF>) {
         val dx = targetBall.x - cueBall.x
@@ -463,21 +540,16 @@ class BilliardCanvasView(context: Context) : View(context) {
         val dirX = dx / dist
         val dirY = dy / dist
 
-        // 1. Raycast de la bola objetivo hasta la banda con la que choca
         val firstCushionHit = raycastCushion(targetBall, dirX, dirY)
+        canvas.drawLine(targetBall.x, targetBall.y, firstCushionHit.point.x, firstCushionHit.point.y, paintTargetBankLine)
 
-        // 2. Línea desde la bola objetivo hasta la banda
-        canvas.drawLine(targetBall.x, targetBall.y, firstCushionHit.point.x, firstCushionHit.point.y, paintTargetBankShot)
-
-        // 3. De entre todas las buchacas, calcular cuál buchaca conecta por rebote en esta banda
         val bestBank = findBestBankShotToPocket(targetBall, firstCushionHit.cushionSide, pockets)
 
         if (bestBank != null) {
-            // Línea de rebote EXTENDIDA DIRECTAMENTE AL FONDO DE LA BUCHACA ENCONTRADA
-            canvas.drawLine(bestBank.bouncePoint.x, bestBank.bouncePoint.y, bestBank.pocketPoint.x, bestBank.pocketPoint.y, paintTargetBankShot)
+            // Línea que sale de la banda DIRECTAMENTE AL FONDO DE LA BUCHACA
+            canvas.drawLine(bestBank.bouncePoint.x, bestBank.bouncePoint.y, bestBank.pocketPoint.x, bestBank.pocketPoint.y, paintTargetBankLine)
             drawPocketHighlight(canvas, bestBank.pocketPoint, bestBank.pocketIndex, "★ REBOTE A BUCHACA #${bestBank.pocketIndex + 1}", false)
 
-            // Línea del taco de la blanca
             val shotDx = bestBank.bouncePoint.x - targetBall.x
             val shotDy = bestBank.bouncePoint.y - targetBall.y
             val shotDist = hypot(shotDx.toDouble(), shotDy.toDouble()).toFloat()
@@ -486,23 +558,18 @@ class BilliardCanvasView(context: Context) : View(context) {
                 val uY = shotDy / shotDist
                 val ghostX = targetBall.x - uX * (ballRadius * 2f)
                 val ghostY = targetBall.y - uY * (ballRadius * 2f)
-                canvas.drawLine(cueBall.x, cueBall.y, ghostX, ghostY, paintCueShot)
+                canvas.drawLine(cueBall.x, cueBall.y, ghostX, ghostY, paintCueTrajectory)
                 canvas.drawCircle(ghostX, ghostY, ballRadius, paintGhostBall)
             }
         } else {
-            // Si el rebote no conecta con una buchaca de 1 banda, reflejar el rayo buscando la siguiente banda
+            // Rebote continuo de 2 bandas
             val refDirX = if (firstCushionHit.cushionSide == CushionSide.LEFT || firstCushionHit.cushionSide == CushionSide.RIGHT) -dirX else dirX
             val refDirY = if (firstCushionHit.cushionSide == CushionSide.TOP || firstCushionHit.cushionSide == CushionSide.BOTTOM) -dirY else dirY
-
             val secondHit = raycastCushion(firstCushionHit.point, refDirX, refDirY)
-            canvas.drawLine(firstCushionHit.point.x, firstCushionHit.point.y, secondHit.point.x, secondHit.point.y, paintTargetBankShot)
+            canvas.drawLine(firstCushionHit.point.x, firstCushionHit.point.y, secondHit.point.x, secondHit.point.y, paintTargetBankLine)
         }
     }
 
-    /**
-     * Calcula analíticamente mediante la Ley de Reflexión por Espejo el punto exacto en la banda
-     * que hace que la bola rebote DIRECTAMENTE hacia una buchaca.
-     */
     private fun findBestBankShotToPocket(origin: PointF, cushion: CushionSide, pockets: List<PointF>): BankSolution? {
         val boundLeft = tableRect.left + ballRadius
         val boundRight = tableRect.right - ballRadius
@@ -514,8 +581,6 @@ class BilliardCanvasView(context: Context) : View(context) {
 
         for (i in pockets.indices) {
             val pocket = pockets[i]
-
-            // Calcular punto reflejado de la buchaca detrás de la banda
             val mirrorPocket = PointF(pocket.x, pocket.y)
             when (cushion) {
                 CushionSide.TOP -> mirrorPocket.y = 2 * boundTop - pocket.y
@@ -525,10 +590,8 @@ class BilliardCanvasView(context: Context) : View(context) {
                 else -> continue
             }
 
-            // Hallar intersección entre la línea origin -> mirrorPocket y la banda
             val deltaX = mirrorPocket.x - origin.x
             val deltaY = mirrorPocket.y - origin.y
-
             val bouncePoint = PointF()
 
             when (cushion) {
@@ -553,7 +616,6 @@ class BilliardCanvasView(context: Context) : View(context) {
                 else -> continue
             }
 
-            // Comprobar la diferencia de ángulo entre la dirección actual y este rebote a buchaca
             val curDx = bouncePoint.x - origin.x
             val curDy = bouncePoint.y - origin.y
             val dist = hypot(curDx.toDouble(), curDy.toDouble()).toFloat()
@@ -584,8 +646,8 @@ class BilliardCanvasView(context: Context) : View(context) {
     }
 
     private fun drawPocketHighlight(canvas: Canvas, p: PointF, pocketIdx: Int, label: String, isDirect: Boolean) {
-        paintPocketHalo.color = if (isDirect) Color.parseColor("#00E676") else Color.parseColor("#FFD600")
-        canvas.drawCircle(p.x, p.y, ballRadius * 2.2f, paintPocketHalo)
+        paintPocketRing.color = if (isDirect) Color.parseColor("#00E676") else Color.parseColor("#FFD600")
+        canvas.drawCircle(p.x, p.y, ballRadius * 2.2f, paintPocketRing)
 
         val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = if (isDirect) Color.parseColor("#00E676") else Color.parseColor("#FFD600")
@@ -678,34 +740,134 @@ class BilliardCanvasView(context: Context) : View(context) {
         )
     }
 
-    fun detectCueBallFromBitmap(bmp: Bitmap) {
+    /**
+     * VISIÓN ARTIFICIAL:
+     * 1. Detecta la Bola Blanca por brillo blanco puro.
+     * 2. Detecta todas las demás bolas en el tapete de juego.
+     * 3. Detecta la dirección del tiro y selecciona automáticamente la bola a meter y su buchaca.
+     */
+    fun detectAllBallsAndAimFromBitmap(bmp: Bitmap) {
         val left = tableRect.left.toInt().coerceIn(0, bmp.width - 1)
         val right = tableRect.right.toInt().coerceIn(0, bmp.width - 1)
         val top = tableRect.top.toInt().coerceIn(0, bmp.height - 1)
         val bottom = tableRect.bottom.toInt().coerceIn(0, bmp.height - 1)
 
-        var sumX = 0L
-        var sumY = 0L
-        var count = 0
+        // 1. Encontrar la Bola Blanca (el círculo más blanco y brillante de la mesa)
+        var whiteSumX = 0L
+        var whiteSumY = 0L
+        var whiteCount = 0
 
-        for (y in top..bottom step 4) {
-            for (x in left..right step 4) {
+        // 2. Muestreo de color promedio del paño / tapete
+        val centerX = (left + right) / 2
+        val centerY = (top + bottom) / 2
+        val centerPix = bmp.getPixel(centerX, centerY)
+        val feltR = Color.red(centerPix)
+        val feltG = Color.green(centerPix)
+        val feltB = Color.blue(centerPix)
+
+        val potentialBallPoints = mutableListOf<PointF>()
+
+        for (y in top..bottom step 6) {
+            for (x in left..right step 6) {
                 val pixel = bmp.getPixel(x, y)
                 val r = Color.red(pixel)
                 val g = Color.green(pixel)
                 val b = Color.blue(pixel)
-                if (r > 238 && g > 238 && b > 238 && abs(r - g) < 12 && abs(g - b) < 12) {
-                    sumX += x
-                    sumY += y
-                    count++
+
+                // Detección de blanco puro para la bola blanca
+                if (r > 232 && g > 232 && b > 232 && abs(r - g) < 14 && abs(g - b) < 14) {
+                    whiteSumX += x
+                    whiteSumY += y
+                    whiteCount++
+                } else {
+                    // Detección de cualquier objeto que contraste fuertemente con el tapete
+                    val diff = abs(r - feltR) + abs(g - feltG) + abs(b - feltB)
+                    if (diff > 75) {
+                        potentialBallPoints.add(PointF(x.toFloat(), y.toFloat()))
+                    }
                 }
             }
         }
-        if (count > 8) {
-            cueBall.x = (sumX / count).toFloat()
-            cueBall.y = (sumY / count).toFloat()
-            invalidate()
+
+        // Posicionar Bola Blanca si se detectó
+        if (whiteCount > 6) {
+            cueBall.x = (whiteSumX / whiteCount).toFloat()
+            cueBall.y = (whiteSumY / whiteCount).toFloat()
         }
+
+        // Agrupar puntos detectados en centros de bolas
+        detectedBalls.clear()
+        val minClusterDist = ballRadius * 1.5f
+
+        for (pt in potentialBallPoints) {
+            // Descartar si está pegado a la bola blanca o a los bordes
+            if (hypot((pt.x - cueBall.x).toDouble(), (pt.y - cueBall.y).toDouble()) < minClusterDist) continue
+
+            var foundExisting = false
+            for (ball in detectedBalls) {
+                if (hypot((pt.x - ball.x).toDouble(), (pt.y - ball.y).toDouble()) < minClusterDist) {
+                    // Promediar centro
+                    ball.x = (ball.x + pt.x) * 0.5f
+                    ball.y = (ball.y + pt.y) * 0.5f
+                    foundExisting = true
+                    break
+                }
+            }
+            if (!foundExisting && detectedBalls.size < 16) {
+                detectedBalls.add(PointF(pt.x, pt.y))
+            }
+        }
+
+        // 3. Detectar la dirección de la línea de tiro / taco que sale de la Bola Blanca
+        var maxBrightness = -1
+        var detectedAngle = aimAngle
+        val sampleRadius = ballRadius * 2.2f
+
+        for (deg in 0 until 360 step 4) {
+            val rad = Math.toRadians(deg.toDouble()).toFloat()
+            val sampleX = (cueBall.x + cos(rad) * sampleRadius).toInt().coerceIn(0, bmp.width - 1)
+            val sampleY = (cueBall.y + sin(rad) * sampleRadius).toInt().coerceIn(0, bmp.height - 1)
+
+            val pix = bmp.getPixel(sampleX, sampleY)
+            val brightness = (Color.red(pix) + Color.green(pix) + Color.blue(pix)) / 3
+
+            if (brightness > maxBrightness && brightness > 180) {
+                maxBrightness = brightness
+                detectedAngle = rad
+            }
+        }
+        aimAngle = detectedAngle
+
+        // 4. IDENTIFICAR LA BOLA A METER (la primera bola que intersecta la dirección de tiro)
+        val aimDirX = cos(aimAngle)
+        val aimDirY = sin(aimAngle)
+
+        var closestBall: PointF? = null
+        var closestDist = Float.MAX_VALUE
+
+        for (ball in detectedBalls) {
+            val toBallX = ball.x - cueBall.x
+            val toBallY = ball.y - cueBall.y
+            val dot = toBallX * aimDirX + toBallY * aimDirY
+
+            // Debe estar delante del tiro
+            if (dot > ballRadius) {
+                // Distancia perpendicular a la línea de tiro
+                val perpDist = abs(toBallX * aimDirY - toBallY * aimDirX)
+                if (perpDist < ballRadius * 1.8f && dot < closestDist) {
+                    closestDist = dot
+                    closestBall = ball
+                }
+            }
+        }
+
+        // Si se encontró la bola a la que se apunta, asignarla como bola objetivo
+        if (closestBall != null) {
+            targetBall.set(closestBall.x, closestBall.y)
+            selectedPocketIndex = -1 // Auto-seleccionar la mejor buchaca para esta bola
+        }
+
+        invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -736,7 +898,16 @@ class BilliardCanvasView(context: Context) : View(context) {
                             return true
                         }
                     }
-                    // Si toca en otra parte del tapete, mover la bola objetivo ahí y volver a auto-detectar
+                    // Si toca cerca de una bola detectada, seleccionarla como bola objetivo
+                    for (b in detectedBalls) {
+                        if (hypot((x - b.x).toDouble(), (y - b.y).toDouble()) < ballRadius * 1.6f) {
+                            targetBall.set(b.x, b.y)
+                            selectedPocketIndex = -1
+                            invalidate()
+                            return true
+                        }
+                    }
+                    // Si toca en otra parte del tapete, mover la bola objetivo ahí
                     if (tableRect.contains(x, y)) {
                         selectedPocketIndex = -1
                         targetBall.set(x, y)

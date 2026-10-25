@@ -338,7 +338,7 @@ class OverlayService : Service() {
             }
         }
 
-        // Botón 5: Escaneo rápido
+        // Botón 5: Escaneo automático continuo de todas las bolas y tiro
         val btnAutoScan = Button(this).apply {
             text = "👁️"
             textSize = 11f
@@ -348,7 +348,26 @@ class OverlayService : Service() {
                 setMargins(dpToPx(2), 0, dpToPx(2), 0)
             }
             setPadding(0, 0, 0, 0)
-            setOnClickListener { scanScreenForCueBall() }
+            setOnClickListener {
+                if (imageReader == null || mediaProjection == null) {
+                    Toast.makeText(this@OverlayService, "Para auto-escáner, abre la app con 'Activar con Detección'.", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                isContinuousScan = !isContinuousScan
+                if (isContinuousScan) {
+                    text = "👁️✓"
+                    setTextColor(Color.parseColor("#00E676"))
+                    background = createButtonDrawable(Color.argb(200, 0, 70, 35))
+                    Toast.makeText(this@OverlayService, "Auto-detección continua ACTIVADA", Toast.LENGTH_SHORT).show()
+                    scanHandler.post(scanRunnable)
+                } else {
+                    text = "👁️"
+                    setTextColor(Color.WHITE)
+                    background = createButtonDrawable(Color.argb(140, 40, 40, 50))
+                    Toast.makeText(this@OverlayService, "Auto-detección pausada", Toast.LENGTH_SHORT).show()
+                    scanHandler.removeCallbacks(scanRunnable)
+                }
+            }
         }
 
         // Botón 6: Minimizar manualmente (ocultar panel)
@@ -408,41 +427,40 @@ class OverlayService : Service() {
         windowManager.updateViewLayout(billiardCanvasView, canvasParams)
     }
 
-    private fun scanScreenForCueBall() {
-        if (imageReader == null || mediaProjection == null) {
-            Toast.makeText(this, "Para auto-escáner, abre la app con 'Activar con Detección'.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        billiardCanvasView.visibility = View.INVISIBLE
-        Handler(Looper.getMainLooper()).postDelayed({
-            try {
-                val image = imageReader?.acquireLatestImage()
-                if (image != null) {
-                    val planes = image.planes
-                    val buffer = planes[0].buffer
-                    val pixelStride = planes[0].pixelStride
-                    val rowStride = planes[0].rowStride
-                    val rowPadding = rowStride - pixelStride * image.width
-
-                    val bitmap = Bitmap.createBitmap(
-                        image.width + rowPadding / pixelStride,
-                        image.height,
-                        Bitmap.Config.ARGB_8888
-                    )
-                    bitmap.copyPixelsFromBuffer(buffer)
-                    image.close()
-
-                    billiardCanvasView.detectCueBallFromBitmap(bitmap)
-                    bitmap.recycle()
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            } finally {
-                billiardCanvasView.visibility = View.VISIBLE
-                billiardCanvasView.invalidate()
+    private var isContinuousScan = false
+    private val scanHandler = Handler(Looper.getMainLooper())
+    private val scanRunnable = object : Runnable {
+        override fun run() {
+            if (isContinuousScan) {
+                performScan()
+                scanHandler.postDelayed(this, 350)
             }
-        }, 60)
+        }
+    }
+
+    private fun performScan() {
+        if (imageReader == null || mediaProjection == null) return
+        try {
+            val image = imageReader?.acquireLatestImage() ?: return
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * image.width
+
+            val bitmap = Bitmap.createBitmap(
+                image.width + rowPadding / pixelStride,
+                image.height,
+                Bitmap.Config.ARGB_8888
+            )
+            bitmap.copyPixelsFromBuffer(buffer)
+            image.close()
+
+            billiardCanvasView.detectAllBallsAndAimFromBitmap(bitmap)
+            bitmap.recycle()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun startForegroundNotification() {
@@ -474,6 +492,8 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isContinuousScan = false
+        scanHandler.removeCallbacks(scanRunnable)
         if (::billiardCanvasView.isInitialized) {
             windowManager.removeView(billiardCanvasView)
         }
