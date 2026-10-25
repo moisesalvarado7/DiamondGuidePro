@@ -19,7 +19,7 @@ class BilliardCanvasView(context: Context) : View(context) {
     )
 
     enum class TargetLineColor(val label: String, val mainColor: Int, val outlineColor: Int) {
-        BLACK("Negro", Color.parseColor("#121212"), Color.WHITE),
+        BLACK("Negro", Color.parseColor("#151515"), Color.WHITE),
         GOLD("Oro", Color.parseColor("#FFD600"), Color.parseColor("#FFF9C4")),
         CYAN("Cyan", Color.parseColor("#00E5FF"), Color.WHITE),
         GREEN("Verde", Color.parseColor("#00E676"), Color.WHITE),
@@ -32,12 +32,11 @@ class BilliardCanvasView(context: Context) : View(context) {
     // Rectángulo del tapete de juego
     var tableRect = RectF(260f, 220f, 2180f, 1180f)
     var cueBall = PointF(700f, 650f)       // Bola Blanca
-    var aimAngle = 0f                      // Ángulo de puntería detectado (en radianes)
+    var aimAngle = 0f                      // Ángulo de disparo del taco
     var ballRadius = 25f                   // Radio automático calculado de la bola
 
-    // Lista de todas las bolas detectadas automáticamente en la mesa
+    // Lista de todas las bolas detectadas en la mesa en tiempo real
     val detectedBalls = mutableListOf<PointF>()
-    var targetBall = PointF(1500f, 520f)   // Fallback inicial si la cámara aún no detecta bolas
 
     private var activeDragItem = -1
     private val prefs = context.getSharedPreferences("diamond_guide_prefs", Context.MODE_PRIVATE)
@@ -58,12 +57,12 @@ class BilliardCanvasView(context: Context) : View(context) {
         strokeWidth = 2.5f
     }
 
-    // 1. PINCELES DE LA BOLA BLANCA (BLANCO PURO NÍTIDO CON HALO)
+    // 1. PINCELES DE LA PRIMERA TRAYECTORIA (BOLA BLANCA DESDE LA PUNTA DEL TACO)
     private val paintCueLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.STROKE
-        strokeWidth = 3.6f
-        setShadowLayer(6f, 0f, 0f, Color.argb(180, 255, 255, 255))
+        strokeWidth = 3.8f
+        setShadowLayer(7f, 0f, 0f, Color.argb(200, 255, 255, 255))
     }
     private val paintCueRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -80,25 +79,23 @@ class BilliardCanvasView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
 
-    // 2. PINCELES DE LA SEGUNDA LÍNEA (BOLA OBJETIVO / A ANOTAR)
+    // 2. PINCELES DE LA SEGUNDA TRAYECTORIA (BOLA A ANOTAR TRAS EL IMPACTO)
     private val paintTargetLineCore = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 4.0f
+        strokeWidth = 4.2f
     }
     private val paintTargetLineOutline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 6.2f
+        strokeWidth = 6.4f
     }
     private val paintTargetRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 2.8f
     }
-    private val paintTargetFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
 
-    private val paintDetectedBall = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(140, 255, 255, 255)
+    // Pincel para visualizar todas las bolas detectadas en la mesa
+    private val paintDetectedBallOutline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(120, 255, 255, 255)
         style = Paint.Style.STROKE
         strokeWidth = 1.8f
     }
@@ -133,10 +130,9 @@ class BilliardCanvasView(context: Context) : View(context) {
             val top = h * 0.14f
             tableRect.set(left, top, left + feltW, top + feltH)
             cueBall.set(tableRect.left + tableRect.width() * 0.35f, tableRect.centerY() + 60f)
-            targetBall.set(tableRect.left + tableRect.width() * 0.70f, tableRect.centerY() - 40f)
-            aimAngle = atan2(targetBall.y - cueBall.y, targetBall.x - cueBall.x)
+            aimAngle = 0f
         }
-        // Radio de bola estándar automático según la altura de la mesa en 8 Ball Pool
+        // Radio de bola automático estándar según proporciones de 8 Ball Pool
         ballRadius = tableRect.height() * 0.042f
     }
 
@@ -175,24 +171,51 @@ class BilliardCanvasView(context: Context) : View(context) {
         )
     }
 
+    /**
+     * Actualiza la detección de visión proveniente del hilo en segundo plano (sin bloquear la UI)
+     */
+    fun updateDetectionFromBackground(cueX: Float, cueY: Float, angle: Float, balls: List<PointF>) {
+        // Suavizado de posición de bola blanca
+        cueBall.x = cueBall.x * 0.25f + cueX * 0.75f
+        cueBall.y = cueBall.y * 0.25f + cueY * 0.75f
+
+        // Suavizado del ángulo del taco
+        val angleDiff = atan2(sin(angle - aimAngle), cos(angle - aimAngle))
+        aimAngle += (angleDiff * 0.65f)
+
+        detectedBalls.clear()
+        detectedBalls.addAll(balls)
+
+        postInvalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        // 1. Límites interiores limpios de las bandas y troneras
+        // 1. Límites interiores de la mesa y las troneras
         canvas.drawRect(tableRect, paintInnerCushion)
         drawPockets(canvas)
 
-        // 2. Trazar la simulación automática:
-        //    - Línea de la bola blanca con todos sus rebotes
-        //    - Si toca cualquier bola detectada en la mesa: traza automáticamente la segunda línea
-        drawAutomaticDualLineSimulation(canvas)
+        // 2. Indicadores sutiles de todas las bolas detectadas en la mesa
+        for (ball in detectedBalls) {
+            if (hypot((ball.x - cueBall.x).toDouble(), (ball.y - cueBall.y).toDouble()) > ballRadius * 1.4f) {
+                canvas.drawCircle(ball.x, ball.y, ballRadius, paintDetectedBallOutline)
+            }
+        }
 
-        // 3. Dibujar la bola blanca
+        // 3. SIMULACIÓN DINÁMICA DUAL:
+        //    - Línea 1: Desde la punta del taco a través de la bola blanca con todos sus rebotes.
+        //    - Línea 2: Si la trayectoria de la blanca toca algún borde de otra bola, se genera
+        //      automáticamente la segunda trayectoria indicando hacia dónde irá a anotar,
+        //      sin perder la dinámica de ambas líneas.
+        drawDualDynamicTrajectories(canvas)
+
+        // 4. Dibujar la bola blanca
         canvas.drawCircle(cueBall.x, cueBall.y, ballRadius, paintCueFill)
         canvas.drawCircle(cueBall.x, cueBall.y, ballRadius, paintCueRing)
         canvas.drawCircle(cueBall.x, cueBall.y, 3.5f, paintCueDot)
 
-        // 4. Modo de ajuste de esquinas de la mesa
+        // 5. Ajuste manual de esquinas si se activa
         if (mode == Mode.ADJUST_TABLE) {
             drawAdjustmentHandles(canvas)
         }
@@ -212,25 +235,17 @@ class BilliardCanvasView(context: Context) : View(context) {
     }
 
     /**
-     * SIMULACIÓN FÍSICA AUTOMÁTICA EN TIEMPO REAL:
-     * - Traza el recorrido y rebotes de la Bola Blanca.
-     * - Comprueba automáticamente si choca con CUALQUIERA de las bolas detectadas en la mesa.
-     * - Si toca algún borde de una bola:
-     *   1) Detiene la blanca en el punto de contacto exacto (Bola Fantasma).
-     *   2) Traza la desviación de la blanca y sus rebotes.
-     *   3) GENERA AUTOMÁTICAMENTE LA SEGUNDA LÍNEA de rebote multi-banda para esa bola objetivo.
-     * - Si no toca ninguna bola: solo muestra la línea blanca y sus rebotes (como en la Foto 1).
+     * DIBUJA AMBAS TRAYECTORIAS DINÁMICAS EN TIEMPO REAL:
+     * - Primera trayectoria: de la punta del taco a través de la blanca con todos sus rebotes.
+     * - Segunda trayectoria: generada al tocar cualquier bola objetivo, mostrando a dónde irá a anotar.
      */
-    private fun drawAutomaticDualLineSimulation(canvas: Canvas) {
+    private fun drawDualDynamicTrajectories(canvas: Canvas) {
         val boundLeft = tableRect.left + ballRadius
         val boundRight = tableRect.right - ballRadius
         val boundTop = tableRect.top + ballRadius
         val boundBottom = tableRect.bottom - ballRadius
         val pockets = getPocketsList()
         val pocketRadius = ballRadius * 1.55f
-
-        // Conjunto de bolas candidatas a impactar (las detectadas por la cámara o el targetBall de respaldo)
-        val ballsToCheck = if (detectedBalls.isNotEmpty()) detectedBalls else listOf(targetBall)
 
         val cuePoints = mutableListOf<PointF>()
         cuePoints.add(PointF(cueBall.x, cueBall.y))
@@ -240,7 +255,7 @@ class BilliardCanvasView(context: Context) : View(context) {
         var curDirX = cos(aimAngle)
         var curDirY = sin(aimAngle)
 
-        var hitTargetBall: PointF? = null
+        var hitBall: PointF? = null
         var ghostPoint: PointF? = null
         var impulseDirX = 0f
         var impulseDirY = 0f
@@ -250,13 +265,12 @@ class BilliardCanvasView(context: Context) : View(context) {
         val maxWhiteBounces = 4
 
         for (b in 0..maxWhiteBounces) {
-            // A. Comprobar colisión con CUALQUIER bola en la mesa
+            // A. Comprobar si la trayectoria blanca toca algún pedazo o borde de CUALQUIER bola en la mesa
             var nearestHitDist = Float.MAX_VALUE
             var nearestBall: PointF? = null
 
-            for (ball in ballsToCheck) {
-                // Ignorar la propia bola blanca
-                if (hypot((ball.x - cueBall.x).toDouble(), (ball.y - cueBall.y).toDouble()) < ballRadius * 1.5f) continue
+            for (ball in detectedBalls) {
+                if (hypot((ball.x - cueBall.x).toDouble(), (ball.y - cueBall.y).toDouble()) < ballRadius * 1.3f) continue
 
                 val toTx = ball.x - curPos.x
                 val toTy = ball.y - curPos.y
@@ -278,7 +292,7 @@ class BilliardCanvasView(context: Context) : View(context) {
                 }
             }
 
-            // B. Comprobar choque con la banda más cercana en este tramo
+            // B. Comprobar distancia a la banda más cercana en este tramo
             var cushionDist = Float.MAX_VALUE
             var hitSide = CushionSide.NONE
             var hitCushionX = curPos.x
@@ -321,23 +335,23 @@ class BilliardCanvasView(context: Context) : View(context) {
                 }
             }
 
-            // C. Evaluar si ocurre primero el choque con la bola o con la banda
+            // C. Determinar si choca primero con la bola o con la banda
             if (nearestBall != null && nearestHitDist < cushionDist && nearestHitDist < 3000f) {
-                // ¡COLISIÓN AUTOMÁTICA DETECTADA!
-                hitTargetBall = nearestBall
+                // ¡COLISIÓN DETECTADA CON BOLA OBJETIVO!
+                hitBall = nearestBall
                 val gx = curPos.x + curDirX * nearestHitDist
                 val gy = curPos.y + curDirY * nearestHitDist
                 ghostPoint = PointF(gx, gy)
                 cuePoints.add(PointF(gx, gy))
 
-                // Vector de impulso sobre la bola objetivo (de centro de fantasma a centro de bola)
+                // Vector normal de impacto (impulso hacia donde saldrá disparada la bola objetivo)
                 val ndx = nearestBall.x - gx
                 val ndy = nearestBall.y - gy
                 val nLen = hypot(ndx.toDouble(), ndy.toDouble()).toFloat()
                 impulseDirX = if (nLen > 0.01f) ndx / nLen else curDirX
                 impulseDirY = if (nLen > 0.01f) ndy / nLen else curDirY
 
-                // Vector de desvío a 90° de la blanca
+                // Vector de desvío a 90° de la bola blanca
                 val cross = curDirX * impulseDirY - curDirY * impulseDirX
                 if (cross > 0) {
                     deflectDirX = -impulseDirY
@@ -347,7 +361,7 @@ class BilliardCanvasView(context: Context) : View(context) {
                     deflectDirY = -impulseDirX
                 }
 
-                break // Termina el recorrido inicial de la blanca
+                break
             } else if (cushionDist < 3000f) {
                 val hitPt = PointF(hitCushionX, hitCushionY)
                 cuePoints.add(hitPt)
@@ -372,7 +386,7 @@ class BilliardCanvasView(context: Context) : View(context) {
         }
 
         // =========================================================================
-        // 1. DIBUJAR LA LÍNEA BLANCA DE LA BOLA BLANCA
+        // 1. DIBUJAR LA PRIMERA TRAYECTORIA (BOLA BLANCA)
         // =========================================================================
         for (i in 0 until cuePoints.size - 1) {
             val p1 = cuePoints[i]
@@ -384,23 +398,23 @@ class BilliardCanvasView(context: Context) : View(context) {
             canvas.drawCircle(bp.x, bp.y, ballRadius, paintCueRing)
         }
 
-        // Si NO tocó ninguna bola (Foto 1):
-        if (hitTargetBall == null || ghostPoint == null) {
+        // Si la blanca no toca ninguna bola, continúa mostrando todos sus rebotes (Foto 1)
+        if (hitBall == null || ghostPoint == null) {
             val lastPt = cuePoints.last()
             canvas.drawCircle(lastPt.x, lastPt.y, ballRadius, paintCueRing)
-            return // Solo la blanca rebotando
+            return
         }
 
         // =========================================================================
-        // 2. SI TOCÓ LA BOLA OBJETIVO (Fotos 2 y 3):
-        //    A) Bola Fantasma (○)
-        //    B) Desvío de la Bola Blanca
-        //    C) GENERACIÓN AUTOMÁTICA DE LA SEGUNDA LÍNEA PARA LA BOLA A ANOTAR
+        // 2. CUANDO TOCA OTRA BOLA:
+        //    A) Círculo de la Bola Fantasma (○) en el punto de contacto
+        //    B) Desvío de la bola blanca sin perder la dinámica de la primera trayectoria
+        //    C) GENERACIÓN AUTOMÁTICA DE LA SEGUNDA TRAYECTORIA (a dónde irá a anotar)
         // =========================================================================
         val gp = ghostPoint
         canvas.drawCircle(gp.x, gp.y, ballRadius, paintCueRing)
 
-        // B) Desvío de la bola blanca
+        // B) Desvío de la bola blanca tras el impacto
         val cueDeflectSegments = traceRaySegments(gp, deflectDirX, deflectDirY, maxBounces = 3)
         for (seg in cueDeflectSegments) {
             canvas.drawLine(seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y, paintCueLine)
@@ -413,14 +427,14 @@ class BilliardCanvasView(context: Context) : View(context) {
             canvas.drawCircle(endPt.x, endPt.y, ballRadius, paintCueRing)
         }
 
-        // C) SEGUNDA LÍNEA DE REFERENCIA DE LA BOLA A ANOTAR (multi-banda)
+        // C) SEGUNDA TRAYECTORIA: DE LA BOLA A ANOTAR HACIA LA BUCHACA CON SUS REBOTES
         val targetColor = TargetLineColor.values()[currentColorIndex]
         paintTargetLineCore.color = targetColor.mainColor
         paintTargetLineOutline.color = targetColor.outlineColor
         paintTargetRing.color = targetColor.mainColor
 
-        val targetSegments = traceRaySegments(hitTargetBall, impulseDirX, impulseDirY, maxBounces = 4)
-        val isDark = (currentColorIndex == 0) // Negro con borde blanco
+        val targetSegments = traceRaySegments(hitBall, impulseDirX, impulseDirY, maxBounces = 4)
+        val isDark = (currentColorIndex == 0) // Negro con fino contorno blanco
 
         for (seg in targetSegments) {
             if (isDark) {
@@ -541,102 +555,6 @@ class BilliardCanvasView(context: Context) : View(context) {
             "📐 Arrastra las 4 esquinas a las troneras de la mesa de tu juego.",
             tableRect.left + 20f, tableRect.top - 35f, paintHint
         )
-    }
-
-    /**
-     * DETECCIÓN CONTINUA AUTOMÁTICA EN TIEMPO REAL:
-     * - Detecta la bola blanca automáticamente.
-     * - Detecta todas las demás bolas en el tapete de 8 Ball Pool automáticamente.
-     * - Detecta la orientación del taco para seguir el juego tiro a tiro sin que el usuario toque nada.
-     */
-    fun detectAllBallsAndAimFromBitmap(bmp: Bitmap) {
-        val left = tableRect.left.toInt().coerceIn(0, bmp.width - 1)
-        val right = tableRect.right.toInt().coerceIn(0, bmp.width - 1)
-        val top = tableRect.top.toInt().coerceIn(0, bmp.height - 1)
-        val bottom = tableRect.bottom.toInt().coerceIn(0, bmp.height - 1)
-
-        if (right <= left || bottom <= top) return
-
-        val midX = (left + right) / 2
-        val midY = (top + bottom) / 2
-        val pMid = bmp.getPixel(midX, midY)
-        val feltR = Color.red(pMid)
-        val feltG = Color.green(pMid)
-        val feltB = Color.blue(pMid)
-
-        val step = max(4, (ballRadius / 5.5f).toInt())
-        val whitePoints = mutableListOf<PointF>()
-        val otherBallPoints = mutableListOf<PointF>()
-
-        for (y in (top + ballRadius.toInt())..(bottom - ballRadius.toInt()) step step) {
-            for (x in (left + ballRadius.toInt())..(right - ballRadius.toInt()) step step) {
-                val pix = bmp.getPixel(x, y)
-                val r = Color.red(pix)
-                val g = Color.green(pix)
-                val b = Color.blue(pix)
-
-                // Detección de blanco puro para bola blanca
-                if (r > 215 && g > 215 && b > 215 && abs(r - g) < 18 && abs(g - b) < 18) {
-                    whitePoints.add(PointF(x.toFloat(), y.toFloat()))
-                } else {
-                    val diff = abs(r - feltR) + abs(g - feltG) + abs(b - feltB)
-                    // Alto contraste con el paño o bola 8 negra
-                    if (diff > 55 || (r < 45 && g < 45 && b < 45)) {
-                        otherBallPoints.add(PointF(x.toFloat(), y.toFloat()))
-                    }
-                }
-            }
-        }
-
-        // Posicionar Bola Blanca automáticamente
-        if (whitePoints.size >= 5) {
-            var sx = 0f; var sy = 0f
-            for (pt in whitePoints) { sx += pt.x; sy += pt.y }
-            cueBall.x = sx / whitePoints.size
-            cueBall.y = sy / whitePoints.size
-        }
-
-        // Agrupar todas las demás bolas en la mesa automáticamente
-        detectedBalls.clear()
-        val clusterDist = ballRadius * 1.35f
-        for (pt in otherBallPoints) {
-            if (hypot((pt.x - cueBall.x).toDouble(), (pt.y - cueBall.y).toDouble()) < clusterDist) continue
-
-            var merged = false
-            for (b in detectedBalls) {
-                if (hypot((pt.x - b.x).toDouble(), (pt.y - b.y).toDouble()) < clusterDist) {
-                    b.x = (b.x + pt.x) * 0.5f
-                    b.y = (b.y + pt.y) * 0.5f
-                    merged = true
-                    break
-                }
-            }
-            if (!merged && detectedBalls.size < 16) {
-                detectedBalls.add(PointF(pt.x, pt.y))
-            }
-        }
-
-        // Detectar orientación del taco o guía de tiro automáticamente
-        var maxBrightness = -1
-        var detectedAngle = aimAngle
-        val sampleRadius = ballRadius * 2.4f
-
-        for (deg in 0 until 360 step 3) {
-            val rad = Math.toRadians(deg.toDouble()).toFloat()
-            val sx = (cueBall.x + cos(rad) * sampleRadius).toInt().coerceIn(0, bmp.width - 1)
-            val sy = (cueBall.y + sin(rad) * sampleRadius).toInt().coerceIn(0, bmp.height - 1)
-
-            val pix = bmp.getPixel(sx, sy)
-            val brightness = (Color.red(pix) + Color.green(pix) + Color.blue(pix)) / 3
-
-            if (brightness > maxBrightness && brightness > 170) {
-                maxBrightness = brightness
-                detectedAngle = rad
-            }
-        }
-        aimAngle = detectedAngle
-
-        invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
