@@ -114,6 +114,10 @@ class MainActivity : Activity() {
                 startActivityForResult(projectionManager.createScreenCaptureIntent(), SCREEN_CAPTURE_REQ)
             }
         } else if (requestCode == SCREEN_CAPTURE_REQ) {
+            if (resultCode != Activity.RESULT_OK || data == null) {
+                Toast.makeText(this, "Permiso de captura de pantalla cancelado", Toast.LENGTH_SHORT).show()
+                return
+            }
             val serviceIntent = Intent(this, OverlayService::class.java).apply {
                 putExtra("RESULT_CODE", resultCode)
                 putExtra("DATA", data)

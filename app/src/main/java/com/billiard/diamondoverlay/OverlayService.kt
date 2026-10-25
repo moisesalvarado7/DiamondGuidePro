@@ -64,27 +64,44 @@ class OverlayService : Service() {
         val data: Intent? = intent?.getParcelableExtra("DATA")
         val hasProjection = (resultCode == Activity.RESULT_OK && data != null)
 
-        startForegroundNotification(hasProjection)
-        setupDisplayMetrics()
-
-        if (!::billiardCanvasView.isInitialized) {
-            setupOverlays()
+        if (!hasProjection || data == null) {
+            stopSelf()
+            return START_NOT_STICKY
         }
 
-        if (hasProjection && data != null) {
+        try {
+            startForegroundNotification()
+            setupDisplayMetrics()
+
+            if (!::billiardCanvasView.isInitialized) {
+                setupOverlays()
+            }
+
             setupMediaProjection(resultCode, data)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            stopSelf()
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun setupDisplayMetrics() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        windowManager.defaultDisplay.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        screenDensity = metrics.densityDpi
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.maximumWindowMetrics.bounds
+            val w = abs(bounds.width())
+            val h = abs(bounds.height())
+            screenWidth = max(w, h)
+            screenHeight = min(w, h)
+            screenDensity = resources.configuration.densityDpi
+        } else {
+            val metrics = DisplayMetrics()
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+            screenWidth = max(metrics.widthPixels, metrics.heightPixels)
+            screenHeight = min(metrics.widthPixels, metrics.heightPixels)
+            screenDensity = metrics.densityDpi
+        }
     }
 
     private fun setupMediaProjection(resultCode: Int, data: Intent) {
@@ -97,7 +114,7 @@ class OverlayService : Service() {
             scannerThread = HandlerThread("BallScannerThread").apply { start() }
             scannerHandler = Handler(scannerThread!!.looper)
 
-            // Usar resolución nativa para compatibilidad total con la GPU de MagicOS / Android 14
+            // Usar resolución nativa horizontal del juego para compatibilidad con la GPU
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "BilliardScanner",
@@ -106,13 +123,13 @@ class OverlayService : Service() {
                 imageReader?.surface, null, null
             )
 
-            // Procesar cada cuadro directamente desde el buffer de memoria nativo
+            // Procesar cada cuadro directamente desde el buffer nativo
             imageReader?.setOnImageAvailableListener({ reader ->
                 val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
                 try {
                     processFrameDirectFromBuffer(image)
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                } catch (t: Throwable) {
+                    t.printStackTrace()
                 } finally {
                     image.close() // SIEMPRE liberar para que nunca se quede atorado
                 }
@@ -351,9 +368,11 @@ class OverlayService : Service() {
         val scaledBalls = balls.map { PointF(it.x * scaleX, it.y * scaleY) }
         val scaledFelt = RectF(feltLeft * scaleX, feltTop * scaleY, feltRight * scaleX, feltBottom * scaleY)
 
-        billiardCanvasView.updateDetectionFromBackground(
-            scaledCueX, scaledCueY, aimAngle, scaledBalls, scaledFelt
-        )
+        billiardCanvasView.post {
+            billiardCanvasView.updateDetectionFromBackground(
+                scaledCueX, scaledCueY, aimAngle, scaledBalls, scaledFelt
+            )
+        }
     }
 
     private fun setupOverlays() {
@@ -567,7 +586,7 @@ class OverlayService : Service() {
         windowManager.updateViewLayout(billiardCanvasView, canvasParams)
     }
 
-    private fun startForegroundNotification(hasProjection: Boolean) {
+    private fun startForegroundNotification() {
         val channelId = "billiard_overlay_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(channelId, "Diamond Guide Overlay", NotificationManager.IMPORTANCE_LOW)
@@ -582,23 +601,7 @@ class OverlayService : Service() {
         } else Notification()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                if (hasProjection) {
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
-                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                } else {
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                }
-            } else {
-                if (hasProjection) {
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                } else 0
-            }
-            if (type != 0) {
-                startForeground(1, notification, type)
-            } else {
-                startForeground(1, notification)
-            }
+            startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
             startForeground(1, notification)
         }
@@ -608,11 +611,19 @@ class OverlayService : Service() {
         super.onDestroy()
         scannerThread?.quitSafely()
         scannerThread = null
-        if (::billiardCanvasView.isInitialized) {
-            windowManager.removeView(billiardCanvasView)
+        try {
+            if (::billiardCanvasView.isInitialized && billiardCanvasView.isAttachedToWindow) {
+                windowManager.removeView(billiardCanvasView)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-        if (::controlContainer.isInitialized) {
-            windowManager.removeView(controlContainer)
+        try {
+            if (::controlContainer.isInitialized && controlContainer.isAttachedToWindow) {
+                windowManager.removeView(controlContainer)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
         virtualDisplay?.release()
         imageReader?.close()

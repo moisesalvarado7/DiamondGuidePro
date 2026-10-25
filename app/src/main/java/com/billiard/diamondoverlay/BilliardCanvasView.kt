@@ -35,8 +35,8 @@ class BilliardCanvasView(context: Context) : View(context) {
     var aimAngle = 0f                      // Ángulo de disparo del taco
     var ballRadius = 25f                   // Radio automático calculado de la bola
 
-    // Lista de todas las bolas detectadas en la mesa en tiempo real
-    val detectedBalls = mutableListOf<PointF>()
+    // Lista inmutable atómica de todas las bolas detectadas en la mesa (100% thread-safe)
+    @Volatile var detectedBalls: List<PointF> = emptyList()
 
     private var activeDragItem = -1
     private val prefs = context.getSharedPreferences("diamond_guide_prefs", Context.MODE_PRIVATE)
@@ -204,9 +204,7 @@ class BilliardCanvasView(context: Context) : View(context) {
             }
         }
 
-        detectedBalls.clear()
-        detectedBalls.addAll(balls)
-
+        detectedBalls = ArrayList(balls)
         postInvalidate()
     }
 
@@ -217,8 +215,9 @@ class BilliardCanvasView(context: Context) : View(context) {
         canvas.drawRect(tableRect, paintInnerCushion)
         drawPockets(canvas)
 
-        // 2. Indicadores sutiles de todas las bolas detectadas en la mesa
-        for (ball in detectedBalls) {
+        // 2. Indicadores sutiles de todas las bolas detectadas en la mesa (copia inmutable snapshot)
+        val currentBalls = detectedBalls
+        for (ball in currentBalls) {
             if (hypot((ball.x - cueBall.x).toDouble(), (ball.y - cueBall.y).toDouble()) > ballRadius * 1.4f) {
                 canvas.drawCircle(ball.x, ball.y, ballRadius, paintDetectedBallOutline)
             }
@@ -265,6 +264,8 @@ class BilliardCanvasView(context: Context) : View(context) {
         val boundRight = tableRect.right - ballRadius
         val boundTop = tableRect.top + ballRadius
         val boundBottom = tableRect.bottom - ballRadius
+        if (boundRight <= boundLeft || boundBottom <= boundTop) return
+
         val pockets = getPocketsList()
         val pocketRadius = ballRadius * 1.55f
 
@@ -284,13 +285,14 @@ class BilliardCanvasView(context: Context) : View(context) {
         var deflectDirY = 0f
 
         val maxWhiteBounces = 4
+        val currentBalls = detectedBalls
 
         for (b in 0..maxWhiteBounces) {
             // A. Comprobar si la trayectoria blanca toca algún pedazo o borde de CUALQUIER bola en la mesa
             var nearestHitDist = Float.MAX_VALUE
             var nearestBall: PointF? = null
 
-            for (ball in detectedBalls) {
+            for (ball in currentBalls) {
                 if (hypot((ball.x - cueBall.x).toDouble(), (ball.y - cueBall.y).toDouble()) < ballRadius * 1.3f) continue
 
                 val toTx = ball.x - curPos.x
