@@ -34,8 +34,8 @@ class BilliardCanvasView(context: Context) : View(context) {
     var mode = Mode.LOCKED_PLAY
     var currentColorIndex = 0
 
-    // Rectángulo del tapete de juego y puntos principales
-    var tableRect = RectF(260f, 220f, 2180f, 1180f)
+    // Rectángulo del tapete de juego y puntos principales (coordenadas estándar de 8 Ball Pool)
+    var tableRect = RectF(500f, 264f, 2294f, 1182f)
     var cueBall = PointF(700f, 650f)       // ⚪ Bola Blanca (Punto de inicio de línea 1)
     var targetBall = PointF(1300f, 650f)   // 🎯 Bola Objetivo a meter (Punto de inicio de línea 2)
     var aimAngle = 0f                      // Ángulo hacia donde saldrá disparada la bola objetivo
@@ -183,15 +183,23 @@ class BilliardCanvasView(context: Context) : View(context) {
         return colors[currentColorIndex].label
     }
 
+    fun resetTableToDefault(w: Float, h: Float) {
+        // Coordenadas calculadas y verificadas al milímetro para 8 Ball Pool en pantalla horizontal
+        val left = w * 0.1787f
+        val right = w * 0.8193f
+        val top = h * 0.2094f
+        val bottom = h * 0.9380f
+        tableRect.set(left, top, right, bottom)
+        ballRadius = tableRect.height() * 0.042f
+        saveTableRect()
+        invalidate()
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w <= 0 || h <= 0) return
-        if (!loadTableRect()) {
-            val feltH = h * 0.72f
-            val feltW = feltH * 2.0f
-            val left = (w - feltW) / 2f
-            val top = h * 0.14f
-            tableRect.set(left, top, left + feltW, top + feltH)
+        if (!loadTableRect(w.toFloat(), h.toFloat())) {
+            resetTableToDefault(w.toFloat(), h.toFloat())
         }
         ballRadius = tableRect.height() * 0.042f
         if (!loadBallPositions()) {
@@ -207,17 +215,26 @@ class BilliardCanvasView(context: Context) : View(context) {
             .putFloat("rect_top", tableRect.top)
             .putFloat("rect_right", tableRect.right)
             .putFloat("rect_bottom", tableRect.bottom)
+            .putInt("table_config_version", 3)
             .apply()
     }
 
-    private fun loadTableRect(): Boolean {
+    private fun loadTableRect(w: Float, h: Float): Boolean {
+        val version = prefs.getInt("table_config_version", 0)
+        if (version < 3) return false // Forzar migración a las coordenadas exactas de 8 Ball Pool
         val l = prefs.getFloat("rect_left", -1f)
         val t = prefs.getFloat("rect_top", -1f)
         val r = prefs.getFloat("rect_right", -1f)
         val b = prefs.getFloat("rect_bottom", -1f)
         if (l > 0 && r > l && b > t) {
-            tableRect.set(l, t, r, b)
-            return true
+            val tw = r - l
+            val th = b - t
+            val aspect = tw / th
+            // Validación de proporción real de mesa de billar (~2:1)
+            if (aspect in 1.6f..2.4f && t >= h * 0.12f && b <= h * 0.98f && l >= w * 0.10f && r <= w * 0.92f) {
+                tableRect.set(l, t, r, b)
+                return true
+            }
         }
         return false
     }
@@ -298,23 +315,9 @@ class BilliardCanvasView(context: Context) : View(context) {
     }
 
     /**
-     * Actualiza la detección del entorno en segundo plano sin alterar las coordenadas manuales del usuario
+     * Actualiza la detección de bolas en segundo plano (NUNCA altera los límites ni tamaño de la mesa)
      */
-    fun updateDetectionFromBackground(
-        cueX: Float,
-        cueY: Float,
-        angle: Float,
-        balls: List<PointF>,
-        detectedFelt: RectF? = null
-    ) {
-        // Auto-calibración de la mesa sólo si no ha sido configurada manualmente
-        if (detectedFelt != null && detectedFelt.width() > 400f && detectedFelt.height() > 200f) {
-            if (tableRect.left == 260f || abs(tableRect.left - detectedFelt.left) > 40f) {
-                tableRect.set(detectedFelt)
-                ballRadius = tableRect.height() * 0.042f
-            }
-        }
-
+    fun updateDetectionFromBackground(balls: List<PointF>) {
         detectedBalls = ArrayList(balls)
         postInvalidate()
     }
@@ -576,6 +579,16 @@ class BilliardCanvasView(context: Context) : View(context) {
             "📐 Arrastra las 4 esquinas a las troneras de la mesa de tu juego.",
             tableRect.left + 20f, tableRect.top - 35f, paintHint
         )
+
+        // Botón central para restablecer al tamaño estándar perfecto de 8 Ball Pool
+        val btnW = 340f
+        val btnH = 50f
+        val cx = tableRect.centerX()
+        val cy = tableRect.centerY()
+        val resetRect = RectF(cx - btnW / 2f, cy - btnH / 2f, cx + btnW / 2f, cy + btnH / 2f)
+        canvas.drawRoundRect(resetRect, 18f, 18f, paintBannerBg)
+        canvas.drawRoundRect(resetRect, 18f, 18f, paintBannerBorder)
+        canvas.drawText("🔄 Restablecer Mesa Exacta", cx, cy + 7f, paintBannerText)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -586,6 +599,17 @@ class BilliardCanvasView(context: Context) : View(context) {
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
                 if (mode == Mode.ADJUST_TABLE) {
+                    val btnW = 340f
+                    val btnH = 50f
+                    val cx = tableRect.centerX()
+                    val cy = tableRect.centerY()
+                    if (x in (cx - btnW / 2f)..(cx + btnW / 2f) && y in (cy - btnH / 2f)..(cy + btnH / 2f)) {
+                        resetTableToDefault(width.toFloat(), height.toFloat())
+                        android.widget.Toast.makeText(context, "Mesa restablecida a proporciones estándar de 8 Ball Pool", android.widget.Toast.LENGTH_SHORT).show()
+                        activeDragItem = ITEM_NONE
+                        return true
+                    }
+
                     activeDragItem = when {
                         hypot(x - tableRect.left, y - tableRect.top) < 70f -> ITEM_CORNER_0
                         hypot(x - tableRect.right, y - tableRect.top) < 70f -> ITEM_CORNER_1

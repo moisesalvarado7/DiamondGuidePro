@@ -155,60 +155,15 @@ class OverlayService : Service() {
         val midX = width / 2
         val midY = height / 2
 
-        var feltTop = (height * 0.16f).toInt()
-        var feltBottom = (height * 0.84f).toInt()
-        var feltLeft = (width * 0.12f).toInt()
-        var feltRight = (width * 0.88f).toInt()
+        val scaleX = if (billiardCanvasView.width > 0) billiardCanvasView.width.toFloat() / width.toFloat() else 1.0f
+        val scaleY = if (billiardCanvasView.height > 0) billiardCanvasView.height.toFloat() / height.toFloat() else 1.0f
 
-        // 1. AUTO-CALIBRACIÓN DE MESA: Escanear los 4 límites reales del paño azul en pantalla
-        for (y in (height * 0.05f).toInt()..(height * 0.40f).toInt() step 4) {
-            val offset = y * rowStride + midX * pixelStride
-            if (offset + 2 < bufCapacity) {
-                val r = buffer.get(offset).toInt() and 0xFF
-                val g = buffer.get(offset + 1).toInt() and 0xFF
-                val b = buffer.get(offset + 2).toInt() and 0xFF
-                if (b > 125 && b > r + 30 && g > r + 15) {
-                    feltTop = y + 8
-                    break
-                }
-            }
-        }
-        for (y in (height * 0.95f).toInt() downTo (height * 0.60f).toInt() step 4) {
-            val offset = y * rowStride + midX * pixelStride
-            if (offset + 2 < bufCapacity) {
-                val r = buffer.get(offset).toInt() and 0xFF
-                val g = buffer.get(offset + 1).toInt() and 0xFF
-                val b = buffer.get(offset + 2).toInt() and 0xFF
-                if (b > 125 && b > r + 30 && g > r + 15) {
-                    feltBottom = y - 8
-                    break
-                }
-            }
-        }
-        for (x in (width * 0.05f).toInt()..(width * 0.35f).toInt() step 4) {
-            val offset = midY * rowStride + x * pixelStride
-            if (offset + 2 < bufCapacity) {
-                val r = buffer.get(offset).toInt() and 0xFF
-                val g = buffer.get(offset + 1).toInt() and 0xFF
-                val b = buffer.get(offset + 2).toInt() and 0xFF
-                if (b > 125 && b > r + 30 && g > r + 15) {
-                    feltLeft = x + 8
-                    break
-                }
-            }
-        }
-        for (x in (width * 0.95f).toInt() downTo (width * 0.65f).toInt() step 4) {
-            val offset = midY * rowStride + x * pixelStride
-            if (offset + 2 < bufCapacity) {
-                val r = buffer.get(offset).toInt() and 0xFF
-                val g = buffer.get(offset + 1).toInt() and 0xFF
-                val b = buffer.get(offset + 2).toInt() and 0xFF
-                if (b > 125 && b > r + 30 && g > r + 15) {
-                    feltRight = x - 8
-                    break
-                }
-            }
-        }
+        // Usar los límites fijos y calibrados de la mesa (nunca desconfigurar el tamaño de la mesa)
+        val table = billiardCanvasView.tableRect
+        val feltLeft = (table.left / scaleX).toInt().coerceIn(0, width - 1)
+        val feltTop = (table.top / scaleY).toInt().coerceIn(0, height - 1)
+        val feltRight = (table.right / scaleX).toInt().coerceIn(feltLeft + 100, width)
+        val feltBottom = (table.bottom / scaleY).toInt().coerceIn(feltTop + 100, height)
 
         val feltWidth = feltRight - feltLeft
         val feltHeight = feltBottom - feltTop
@@ -326,17 +281,11 @@ class OverlayService : Service() {
             }
         }
 
-        // 5. ENVIAR RESULTADOS AL LIENZO ESCALADOS SIN BLOQUEOS
-        val scaleX = if (billiardCanvasView.width > 0) billiardCanvasView.width.toFloat() / width.toFloat() else 1.0f
-        val scaleY = if (billiardCanvasView.height > 0) billiardCanvasView.height.toFloat() / height.toFloat() else 1.0f
-
+        // 5. ENVIAR RESULTADOS DE BOLAS AL LIENZO (SIN TOCAR JAMÁS EL TAMAÑO DE LA MESA)
         val scaledBalls = balls.map { PointF(it.x * scaleX, it.y * scaleY) }
-        val scaledFelt = RectF(feltLeft * scaleX, feltTop * scaleY, feltRight * scaleX, feltBottom * scaleY)
 
         billiardCanvasView.post {
-            billiardCanvasView.updateDetectionFromBackground(
-                0f, 0f, 0f, scaledBalls, scaledFelt
-            )
+            billiardCanvasView.updateDetectionFromBackground(scaledBalls)
         }
     }
 
