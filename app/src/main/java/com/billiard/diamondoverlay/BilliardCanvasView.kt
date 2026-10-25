@@ -8,7 +8,7 @@ import kotlin.math.*
 
 class BilliardCanvasView(context: Context) : View(context) {
 
-    enum class Mode { LOCKED_PLAY, ADJUST_AIM, ADJUST_TABLE }
+    enum class Mode { LOCKED_PLAY, ADJUST_TABLE }
     enum class CushionSide { LEFT, TOP, RIGHT, BOTTOM, NONE }
 
     data class RaySegment(
@@ -19,7 +19,7 @@ class BilliardCanvasView(context: Context) : View(context) {
     )
 
     enum class TargetLineColor(val label: String, val mainColor: Int, val outlineColor: Int) {
-        BLACK("Negro", Color.parseColor("#151515"), Color.WHITE),
+        BLACK("Negro", Color.parseColor("#121212"), Color.WHITE),
         GOLD("Oro", Color.parseColor("#FFD600"), Color.parseColor("#FFF9C4")),
         CYAN("Cyan", Color.parseColor("#00E5FF"), Color.WHITE),
         GREEN("Verde", Color.parseColor("#00E676"), Color.WHITE),
@@ -29,22 +29,22 @@ class BilliardCanvasView(context: Context) : View(context) {
     var mode = Mode.LOCKED_PLAY
     var currentColorIndex = 0
 
-    // Rectángulo del tapete de juego (límites interiores de las bandas de goma)
+    // Rectángulo del tapete de juego
     var tableRect = RectF(260f, 220f, 2180f, 1180f)
     var cueBall = PointF(700f, 650f)       // Bola Blanca
-    var targetBall = PointF(1500f, 520f)   // Bola a Anotar (Bola Negra u Objetivo)
-    var ballRadius = 25f                   // Radio calibrable de la bola (22..30px)
-    var aimAngle = 0f                      // Ángulo de puntería en radianes
+    var aimAngle = 0f                      // Ángulo de puntería detectado (en radianes)
+    var ballRadius = 25f                   // Radio automático calculado de la bola
 
-    // Lista de otras bolas detectadas por la cámara
+    // Lista de todas las bolas detectadas automáticamente en la mesa
     val detectedBalls = mutableListOf<PointF>()
+    var targetBall = PointF(1500f, 520f)   // Fallback inicial si la cámara aún no detecta bolas
 
-    private var activeDragItem = -1 // 0..3=Esquinas, 4=Blanca, 5=Objetivo, 6=Apuntar
+    private var activeDragItem = -1
     private val prefs = context.getSharedPreferences("diamond_guide_prefs", Context.MODE_PRIVATE)
 
-    // Pinceles de las bandas y troneras
+    // Pinceles del tapete y troneras
     private val paintInnerCushion = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(100, 0, 229, 255)
+        color = Color.argb(90, 0, 229, 255)
         style = Paint.Style.STROKE
         strokeWidth = 2.0f
     }
@@ -80,7 +80,7 @@ class BilliardCanvasView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
 
-    // 2. PINCELES DE LA BOLA A ANOTAR (LÍNEA OSCURA O DEL COLOR SELECCIONADO)
+    // 2. PINCELES DE LA SEGUNDA LÍNEA (BOLA OBJETIVO / A ANOTAR)
     private val paintTargetLineCore = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 4.0f
@@ -97,12 +97,12 @@ class BilliardCanvasView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
 
-    // Manija de apuntado e indicación
-    private val paintAimHandle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FFD600")
-        style = Paint.Style.FILL
-        setShadowLayer(8f, 0f, 0f, Color.BLACK)
+    private val paintDetectedBall = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(140, 255, 255, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = 1.8f
     }
+
     private val paintHint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#00E5FF")
         textSize = 21f
@@ -112,7 +112,6 @@ class BilliardCanvasView(context: Context) : View(context) {
 
     init {
         setLayerType(LAYER_TYPE_HARDWARE, null)
-        ballRadius = prefs.getFloat("ball_radius", 25f)
         currentColorIndex = prefs.getInt("target_color_index", 0)
     }
 
@@ -124,30 +123,21 @@ class BilliardCanvasView(context: Context) : View(context) {
         return colors[currentColorIndex].label
     }
 
-    fun cycleBallRadius(): Float {
-        ballRadius = when (ballRadius.toInt()) {
-            22 -> 24f
-            24 -> 26f
-            26 -> 28f
-            28 -> 30f
-            else -> 22f
-        }
-        prefs.edit().putFloat("ball_radius", ballRadius).apply()
-        invalidate()
-        return ballRadius
-    }
-
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w <= 0 || h <= 0) return
         if (!loadTableRect()) {
-            val marginX = w * 0.08f
-            val marginY = h * 0.14f
-            tableRect.set(marginX, marginY, w - marginX, h - marginY)
+            val feltH = h * 0.72f
+            val feltW = feltH * 2.0f
+            val left = (w - feltW) / 2f
+            val top = h * 0.14f
+            tableRect.set(left, top, left + feltW, top + feltH)
             cueBall.set(tableRect.left + tableRect.width() * 0.35f, tableRect.centerY() + 60f)
             targetBall.set(tableRect.left + tableRect.width() * 0.70f, tableRect.centerY() - 40f)
             aimAngle = atan2(targetBall.y - cueBall.y, targetBall.x - cueBall.x)
         }
+        // Radio de bola estándar automático según la altura de la mesa en 8 Ball Pool
+        ballRadius = tableRect.height() * 0.042f
     }
 
     fun saveTableRect() {
@@ -192,29 +182,19 @@ class BilliardCanvasView(context: Context) : View(context) {
         canvas.drawRect(tableRect, paintInnerCushion)
         drawPockets(canvas)
 
-        // 2. SIMULACIÓN Y TRAZADO EXACTO SEGÚN LAS IMÁGENES:
-        //    - Traza la trayectoria de la bola blanca con todos sus rebotes en bandas.
-        //    - Si la blanca toca algún borde o pedazo de la bola a anotar:
-        //      muestra el impacto, el desvío de la blanca y traza la segunda línea de referencia para la bola a anotar.
-        drawFullShotSimulation(canvas)
+        // 2. Trazar la simulación automática:
+        //    - Línea de la bola blanca con todos sus rebotes
+        //    - Si toca cualquier bola detectada en la mesa: traza automáticamente la segunda línea
+        drawAutomaticDualLineSimulation(canvas)
 
-        // 3. Dibujar las dos bolas (Blanca y a Anotar) con sus respectivos aros
-        drawBilliardBalls(canvas)
+        // 3. Dibujar la bola blanca
+        canvas.drawCircle(cueBall.x, cueBall.y, ballRadius, paintCueFill)
+        canvas.drawCircle(cueBall.x, cueBall.y, ballRadius, paintCueRing)
+        canvas.drawCircle(cueBall.x, cueBall.y, 3.5f, paintCueDot)
 
-        // 4. Modos de ajuste
+        // 4. Modo de ajuste de esquinas de la mesa
         if (mode == Mode.ADJUST_TABLE) {
             drawAdjustmentHandles(canvas)
-        } else if (mode == Mode.ADJUST_AIM) {
-            canvas.drawText(
-                "🎯 Arrastra en la pantalla para apuntar. Arrastra las bolas para posicionarlas. Toca '🎮 Jugar' al terminar.",
-                tableRect.left + 20f, tableRect.top - 35f, paintHint
-            )
-            // Manija de puntería
-            val handleDist = ballRadius * 2.8f
-            val hx = cueBall.x + cos(aimAngle) * handleDist
-            val hy = cueBall.y + sin(aimAngle) * handleDist
-            canvas.drawLine(cueBall.x, cueBall.y, hx, hy, paintCueLine)
-            canvas.drawCircle(hx, hy, 12f, paintAimHandle)
         }
     }
 
@@ -232,17 +212,16 @@ class BilliardCanvasView(context: Context) : View(context) {
     }
 
     /**
-     * SIMULACIÓN COMPLETA DE FÍSICA Y REBOTES:
-     * 1. Traza la trayectoria de la BOLA BLANCA con todos sus rebotes.
-     * 2. Comprueba si la blanca colisiona con la BOLA A ANOTAR en algún punto de su trayectoria.
-     * 3. Si colisiona:
-     *    - Dibuja la bola fantasma en el punto de contacto.
-     *    - Traza el desvío de la bola blanca (con sus rebotes).
-     *    - Traza la SEGUNDA LÍNEA DE REFERENCIA para la bola a anotar con sus rebotes multi-banda.
-     * 4. Si no colisiona:
-     *    - Solo traza los rebotes continuos de la bola blanca (como en la Foto 1).
+     * SIMULACIÓN FÍSICA AUTOMÁTICA EN TIEMPO REAL:
+     * - Traza el recorrido y rebotes de la Bola Blanca.
+     * - Comprueba automáticamente si choca con CUALQUIERA de las bolas detectadas en la mesa.
+     * - Si toca algún borde de una bola:
+     *   1) Detiene la blanca en el punto de contacto exacto (Bola Fantasma).
+     *   2) Traza la desviación de la blanca y sus rebotes.
+     *   3) GENERA AUTOMÁTICAMENTE LA SEGUNDA LÍNEA de rebote multi-banda para esa bola objetivo.
+     * - Si no toca ninguna bola: solo muestra la línea blanca y sus rebotes (como en la Foto 1).
      */
-    private fun drawFullShotSimulation(canvas: Canvas) {
+    private fun drawAutomaticDualLineSimulation(canvas: Canvas) {
         val boundLeft = tableRect.left + ballRadius
         val boundRight = tableRect.right - ballRadius
         val boundTop = tableRect.top + ballRadius
@@ -250,7 +229,9 @@ class BilliardCanvasView(context: Context) : View(context) {
         val pockets = getPocketsList()
         val pocketRadius = ballRadius * 1.55f
 
-        // Trayectoria de la blanca previa al impacto
+        // Conjunto de bolas candidatas a impactar (las detectadas por la cámara o el targetBall de respaldo)
+        val ballsToCheck = if (detectedBalls.isNotEmpty()) detectedBalls else listOf(targetBall)
+
         val cuePoints = mutableListOf<PointF>()
         cuePoints.add(PointF(cueBall.x, cueBall.y))
         val cueBouncePoints = mutableListOf<PointF>()
@@ -259,7 +240,7 @@ class BilliardCanvasView(context: Context) : View(context) {
         var curDirX = cos(aimAngle)
         var curDirY = sin(aimAngle)
 
-        var hitTargetBall = false
+        var hitTargetBall: PointF? = null
         var ghostPoint: PointF? = null
         var impulseDirX = 0f
         var impulseDirY = 0f
@@ -269,27 +250,35 @@ class BilliardCanvasView(context: Context) : View(context) {
         val maxWhiteBounces = 4
 
         for (b in 0..maxWhiteBounces) {
-            // A. Comprobar si la blanca toca algún borde o pedazo de la bola a anotar
-            val toTx = targetBall.x - curPos.x
-            val toTy = targetBall.y - curPos.y
-            val proj = toTx * curDirX + toTy * curDirY
+            // A. Comprobar colisión con CUALQUIER bola en la mesa
+            var nearestHitDist = Float.MAX_VALUE
+            var nearestBall: PointF? = null
 
-            var hitDist = Float.MAX_VALUE
-            if (proj > 0.05f) {
-                val perpSq = (toTx * toTx + toTy * toTy) - (proj * proj)
-                val twoR = ballRadius * 2f
-                val twoRSq = twoR * twoR
+            for (ball in ballsToCheck) {
+                // Ignorar la propia bola blanca
+                if (hypot((ball.x - cueBall.x).toDouble(), (ball.y - cueBall.y).toDouble()) < ballRadius * 1.5f) continue
 
-                if (perpSq in 0f..twoRSq) {
-                    val offset = sqrt(max(0f, twoRSq - perpSq))
-                    val d = proj - offset
-                    if (d > 0.05f) {
-                        hitDist = d
+                val toTx = ball.x - curPos.x
+                val toTy = ball.y - curPos.y
+                val proj = toTx * curDirX + toTy * curDirY
+
+                if (proj > 0.05f) {
+                    val perpSq = (toTx * toTx + toTy * toTy) - (proj * proj)
+                    val twoR = ballRadius * 2f
+                    val twoRSq = twoR * twoR
+
+                    if (perpSq in 0f..twoRSq) {
+                        val offset = sqrt(max(0f, twoRSq - perpSq))
+                        val d = proj - offset
+                        if (d > 0.05f && d < nearestHitDist) {
+                            nearestHitDist = d
+                            nearestBall = ball
+                        }
                     }
                 }
             }
 
-            // B. Comprobar distancia al choque con la banda más cercana
+            // B. Comprobar choque con la banda más cercana en este tramo
             var cushionDist = Float.MAX_VALUE
             var hitSide = CushionSide.NONE
             var hitCushionX = curPos.x
@@ -332,23 +321,23 @@ class BilliardCanvasView(context: Context) : View(context) {
                 }
             }
 
-            // C. Comparar cuál evento ocurre primero
-            if (hitDist < cushionDist && hitDist < 3000f) {
-                // ¡COLISIÓN CON LA BOLA A ANOTAR!
-                hitTargetBall = true
-                val gx = curPos.x + curDirX * hitDist
-                val gy = curPos.y + curDirY * hitDist
+            // C. Evaluar si ocurre primero el choque con la bola o con la banda
+            if (nearestBall != null && nearestHitDist < cushionDist && nearestHitDist < 3000f) {
+                // ¡COLISIÓN AUTOMÁTICA DETECTADA!
+                hitTargetBall = nearestBall
+                val gx = curPos.x + curDirX * nearestHitDist
+                val gy = curPos.y + curDirY * nearestHitDist
                 ghostPoint = PointF(gx, gy)
                 cuePoints.add(PointF(gx, gy))
 
-                // Vector de impulso sobre la bola a anotar (de centro a centro)
-                val ndx = targetBall.x - gx
-                val ndy = targetBall.y - gy
+                // Vector de impulso sobre la bola objetivo (de centro de fantasma a centro de bola)
+                val ndx = nearestBall.x - gx
+                val ndy = nearestBall.y - gy
                 val nLen = hypot(ndx.toDouble(), ndy.toDouble()).toFloat()
                 impulseDirX = if (nLen > 0.01f) ndx / nLen else curDirX
                 impulseDirY = if (nLen > 0.01f) ndy / nLen else curDirY
 
-                // Vector de desvío de la blanca a 90° (regla de la tangente)
+                // Vector de desvío a 90° de la blanca
                 val cross = curDirX * impulseDirY - curDirY * impulseDirX
                 if (cross > 0) {
                     deflectDirX = -impulseDirY
@@ -360,11 +349,9 @@ class BilliardCanvasView(context: Context) : View(context) {
 
                 break // Termina el recorrido inicial de la blanca
             } else if (cushionDist < 3000f) {
-                // Rebote en banda
                 val hitPt = PointF(hitCushionX, hitCushionY)
                 cuePoints.add(hitPt)
 
-                // Comprobar si entra a una tronera
                 var fellInPocket = false
                 for (p in pockets) {
                     if (hypot((hitPt.x - p.x).toDouble(), (hitPt.y - p.y).toDouble()) < pocketRadius) {
@@ -376,7 +363,6 @@ class BilliardCanvasView(context: Context) : View(context) {
 
                 cueBouncePoints.add(PointF(hitPt.x, hitPt.y))
 
-                // Reflejo en la banda
                 curDirX = if (hitSide == CushionSide.LEFT || hitSide == CushionSide.RIGHT) -curDirX else curDirX
                 curDirY = if (hitSide == CushionSide.TOP || hitSide == CushionSide.BOTTOM) -curDirY else curDirY
                 curPos = PointF(hitCushionX + curDirX * 1.0f, hitCushionY + curDirY * 1.0f)
@@ -386,7 +372,7 @@ class BilliardCanvasView(context: Context) : View(context) {
         }
 
         // =========================================================================
-        // 1. DIBUJAR LA TRAYECTORIA DE LA BOLA BLANCA
+        // 1. DIBUJAR LA LÍNEA BLANCA DE LA BOLA BLANCA
         // =========================================================================
         for (i in 0 until cuePoints.size - 1) {
             val p1 = cuePoints[i]
@@ -394,29 +380,27 @@ class BilliardCanvasView(context: Context) : View(context) {
             canvas.drawLine(p1.x, p1.y, p2.x, p2.y, paintCueLine)
         }
 
-        // Aros blancos (○) en cada punto de rebote de la blanca en la banda
         for (bp in cueBouncePoints) {
             canvas.drawCircle(bp.x, bp.y, ballRadius, paintCueRing)
         }
 
-        // Si NO tocó la bola a anotar (Foto 1):
-        if (!hitTargetBall) {
+        // Si NO tocó ninguna bola (Foto 1):
+        if (hitTargetBall == null || ghostPoint == null) {
             val lastPt = cuePoints.last()
             canvas.drawCircle(lastPt.x, lastPt.y, ballRadius, paintCueRing)
-            return // Solo se muestra la blanca, la negra no tiene línea
+            return // Solo la blanca rebotando
         }
 
         // =========================================================================
-        // 2. SI TOCÓ LA BOLA A ANOTAR (Fotos 2 y 3):
-        //    A) Círculo de la Bola Fantasma (○) en el punto exacto de colisión
-        //    B) Trayectoria y rebotes de desvío de la Bola Blanca
-        //    C) SEGUNDA LÍNEA DE REFERENCIA: Trayectoria de la Bola a Anotar y sus rebotes
+        // 2. SI TOCÓ LA BOLA OBJETIVO (Fotos 2 y 3):
+        //    A) Bola Fantasma (○)
+        //    B) Desvío de la Bola Blanca
+        //    C) GENERACIÓN AUTOMÁTICA DE LA SEGUNDA LÍNEA PARA LA BOLA A ANOTAR
         // =========================================================================
-        val gp = ghostPoint!!
-        // Aro de la Bola Fantasma
+        val gp = ghostPoint
         canvas.drawCircle(gp.x, gp.y, ballRadius, paintCueRing)
 
-        // B) Desvío de la bola blanca (hasta 3 rebotes)
+        // B) Desvío de la bola blanca
         val cueDeflectSegments = traceRaySegments(gp, deflectDirX, deflectDirY, maxBounces = 3)
         for (seg in cueDeflectSegments) {
             canvas.drawLine(seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y, paintCueLine)
@@ -429,13 +413,13 @@ class BilliardCanvasView(context: Context) : View(context) {
             canvas.drawCircle(endPt.x, endPt.y, ballRadius, paintCueRing)
         }
 
-        // C) SEGUNDA LÍNEA DE REFERENCIA: BOLA A ANOTAR (hasta 4 rebotes en banda)
+        // C) SEGUNDA LÍNEA DE REFERENCIA DE LA BOLA A ANOTAR (multi-banda)
         val targetColor = TargetLineColor.values()[currentColorIndex]
         paintTargetLineCore.color = targetColor.mainColor
         paintTargetLineOutline.color = targetColor.outlineColor
         paintTargetRing.color = targetColor.mainColor
 
-        val targetSegments = traceRaySegments(targetBall, impulseDirX, impulseDirY, maxBounces = 4)
+        val targetSegments = traceRaySegments(hitTargetBall, impulseDirX, impulseDirY, maxBounces = 4)
         val isDark = (currentColorIndex == 0) // Negro con borde blanco
 
         for (seg in targetSegments) {
@@ -460,9 +444,6 @@ class BilliardCanvasView(context: Context) : View(context) {
         }
     }
 
-    /**
-     * Traza segmentos lineales sucesivos con rebote en las bandas de goma
-     */
     private fun traceRaySegments(startPos: PointF, dirX: Float, dirY: Float, maxBounces: Int): List<RaySegment> {
         val segments = mutableListOf<RaySegment>()
         val boundLeft = tableRect.left + ballRadius
@@ -523,7 +504,6 @@ class BilliardCanvasView(context: Context) : View(context) {
 
             val hitPt = PointF(hitX, hitY)
 
-            // Comprobar si entra a una tronera
             var inPocket = false
             for (p in pockets) {
                 if (hypot((hitPt.x - p.x).toDouble(), (hitPt.y - p.y).toDouble()) < pocketRadius) {
@@ -545,20 +525,6 @@ class BilliardCanvasView(context: Context) : View(context) {
         return segments
     }
 
-    private fun drawBilliardBalls(canvas: Canvas) {
-        // Bola Blanca
-        canvas.drawCircle(cueBall.x, cueBall.y, ballRadius, paintCueFill)
-        canvas.drawCircle(cueBall.x, cueBall.y, ballRadius, paintCueRing)
-        canvas.drawCircle(cueBall.x, cueBall.y, 3.5f, paintCueDot)
-
-        // Bola a Anotar (Bola Negra u Objetivo)
-        val colorConfig = TargetLineColor.values()[currentColorIndex]
-        paintTargetFill.color = colorConfig.mainColor
-        canvas.drawCircle(targetBall.x, targetBall.y, ballRadius, paintTargetFill)
-        canvas.drawCircle(targetBall.x, targetBall.y, ballRadius, paintCueRing)
-        canvas.drawCircle(targetBall.x, targetBall.y, ballRadius * 0.42f, paintCueFill)
-    }
-
     private fun drawAdjustmentHandles(canvas: Canvas) {
         val paintCorner = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
@@ -572,13 +538,16 @@ class BilliardCanvasView(context: Context) : View(context) {
         canvas.drawCircle(tableRect.right, tableRect.bottom, 30f, paintCorner)
 
         canvas.drawText(
-            "📐 Arrastra las 4 esquinas a las troneras de la mesa de tu juego. Luego toca '🎮 Jugar'.",
+            "📐 Arrastra las 4 esquinas a las troneras de la mesa de tu juego.",
             tableRect.left + 20f, tableRect.top - 35f, paintHint
         )
     }
 
     /**
-     * Detección por cámara / visión si está activa
+     * DETECCIÓN CONTINUA AUTOMÁTICA EN TIEMPO REAL:
+     * - Detecta la bola blanca automáticamente.
+     * - Detecta todas las demás bolas en el tapete de 8 Ball Pool automáticamente.
+     * - Detecta la orientación del taco para seguir el juego tiro a tiro sin que el usuario toque nada.
      */
     fun detectAllBallsAndAimFromBitmap(bmp: Bitmap) {
         val left = tableRect.left.toInt().coerceIn(0, bmp.width - 1)
@@ -595,9 +564,9 @@ class BilliardCanvasView(context: Context) : View(context) {
         val feltG = Color.green(pMid)
         val feltB = Color.blue(pMid)
 
-        val step = max(4, (ballRadius / 5).toInt())
+        val step = max(4, (ballRadius / 5.5f).toInt())
         val whitePoints = mutableListOf<PointF>()
-        val ballPoints = mutableListOf<PointF>()
+        val otherBallPoints = mutableListOf<PointF>()
 
         for (y in (top + ballRadius.toInt())..(bottom - ballRadius.toInt()) step step) {
             for (x in (left + ballRadius.toInt())..(right - ballRadius.toInt()) step step) {
@@ -606,27 +575,31 @@ class BilliardCanvasView(context: Context) : View(context) {
                 val g = Color.green(pix)
                 val b = Color.blue(pix)
 
+                // Detección de blanco puro para bola blanca
                 if (r > 215 && g > 215 && b > 215 && abs(r - g) < 18 && abs(g - b) < 18) {
                     whitePoints.add(PointF(x.toFloat(), y.toFloat()))
                 } else {
                     val diff = abs(r - feltR) + abs(g - feltG) + abs(b - feltB)
-                    if (diff > 55 || (r < 40 && g < 40 && b < 40)) {
-                        ballPoints.add(PointF(x.toFloat(), y.toFloat()))
+                    // Alto contraste con el paño o bola 8 negra
+                    if (diff > 55 || (r < 45 && g < 45 && b < 45)) {
+                        otherBallPoints.add(PointF(x.toFloat(), y.toFloat()))
                     }
                 }
             }
         }
 
-        if (whitePoints.size >= 6) {
+        // Posicionar Bola Blanca automáticamente
+        if (whitePoints.size >= 5) {
             var sx = 0f; var sy = 0f
             for (pt in whitePoints) { sx += pt.x; sy += pt.y }
             cueBall.x = sx / whitePoints.size
             cueBall.y = sy / whitePoints.size
         }
 
+        // Agrupar todas las demás bolas en la mesa automáticamente
         detectedBalls.clear()
         val clusterDist = ballRadius * 1.35f
-        for (pt in ballPoints) {
+        for (pt in otherBallPoints) {
             if (hypot((pt.x - cueBall.x).toDouble(), (pt.y - cueBall.y).toDouble()) < clusterDist) continue
 
             var merged = false
@@ -643,6 +616,7 @@ class BilliardCanvasView(context: Context) : View(context) {
             }
         }
 
+        // Detectar orientación del taco o guía de tiro automáticamente
         var maxBrightness = -1
         var detectedAngle = aimAngle
         val sampleRadius = ballRadius * 2.4f
@@ -662,28 +636,6 @@ class BilliardCanvasView(context: Context) : View(context) {
         }
         aimAngle = detectedAngle
 
-        val aimDirX = cos(aimAngle)
-        val aimDirY = sin(aimAngle)
-        var closestTarget: PointF? = null
-        var closestDist = Float.MAX_VALUE
-
-        for (ball in detectedBalls) {
-            val toBx = ball.x - cueBall.x
-            val toBy = ball.y - cueBall.y
-            val dot = toBx * aimDirX + toBy * aimDirY
-            if (dot > ballRadius * 0.8f) {
-                val perpDist = abs(toBx * aimDirY - toBy * aimDirX)
-                if (perpDist < ballRadius * 2.2f && dot < closestDist) {
-                    closestDist = dot
-                    closestTarget = ball
-                }
-            }
-        }
-
-        if (closestTarget != null) {
-            targetBall.set(closestTarget.x, closestTarget.y)
-        }
-
         invalidate()
     }
 
@@ -699,14 +651,7 @@ class BilliardCanvasView(context: Context) : View(context) {
                     mode == Mode.ADJUST_TABLE && hypot(x - tableRect.right, y - tableRect.top) < 70f -> 1
                     mode == Mode.ADJUST_TABLE && hypot(x - tableRect.left, y - tableRect.bottom) < 70f -> 2
                     mode == Mode.ADJUST_TABLE && hypot(x - tableRect.right, y - tableRect.bottom) < 70f -> 3
-                    hypot(x - cueBall.x, y - cueBall.y) < 70f -> 4 // Tocar directamente la bola blanca
-                    hypot(x - targetBall.x, y - targetBall.y) < 70f -> 5 // Tocar directamente la bola a anotar
-                    else -> 6 // Tocar cualquier otra parte de la pantalla para apuntar la dirección del tiro
-                }
-
-                if (activeDragItem == 6) {
-                    aimAngle = atan2(y - cueBall.y, x - cueBall.x)
-                    invalidate()
+                    else -> -1
                 }
             }
             MotionEvent.ACTION_MOVE -> {
@@ -715,24 +660,12 @@ class BilliardCanvasView(context: Context) : View(context) {
                     1 -> { tableRect.right = x; tableRect.top = y; invalidate() }
                     2 -> { tableRect.left = x; tableRect.bottom = y; invalidate() }
                     3 -> { tableRect.right = x; tableRect.bottom = y; invalidate() }
-                    4 -> {
-                        cueBall.set(x, y)
-                        invalidate()
-                    }
-                    5 -> {
-                        targetBall.set(x, y)
-                        invalidate()
-                    }
-                    6 -> {
-                        // Rotar suavemente la dirección del tiro arrastrando en la pantalla
-                        aimAngle = atan2(y - cueBall.y, x - cueBall.x)
-                        invalidate()
-                    }
                 }
             }
             MotionEvent.ACTION_UP -> {
                 if (activeDragItem in 0..3) {
                     saveTableRect()
+                    ballRadius = tableRect.height() * 0.042f
                 }
                 activeDragItem = -1
             }
