@@ -326,51 +326,16 @@ class OverlayService : Service() {
             }
         }
 
-        // 5. DETECTAR EL TACO Y LA DIRECCIÓN DESDE LA PUNTA DEL TACO
-        var aimAngle = billiardCanvasView.aimAngle
-        val sampleR = ballR * 2.3f
-        var maxBrightness = -1
-        var bestAngle = aimAngle
-
-        for (deg in 0 until 360 step 2) {
-            val rad = Math.toRadians(deg.toDouble()).toFloat()
-            val sx = (cueX + cos(rad) * sampleR).toInt().coerceIn(0, width - 1)
-            val sy = (cueY + sin(rad) * sampleR).toInt().coerceIn(0, height - 1)
-            val offset = sy * rowStride + sx * pixelStride
-            if (offset + 2 >= bufCapacity) continue
-
-            val r = buffer.get(offset).toInt() and 0xFF
-            val g = buffer.get(offset + 1).toInt() and 0xFF
-            val b = buffer.get(offset + 2).toInt() and 0xFF
-
-            val brightness = (r + g + b) / 3
-            // Línea de tiro blanca hacia adelante del juego
-            if (brightness > maxBrightness && brightness > 185) {
-                maxBrightness = brightness
-                bestAngle = rad
-            }
-            // Taco de billar madera/dorado apuntando por detrás
-            if (r > 125 && g in 55..160 && b < 100 && brightness > 80) {
-                val forwardAngle = (rad + Math.PI).toFloat()
-                if (maxBrightness < 185) {
-                    bestAngle = forwardAngle
-                }
-            }
-        }
-        aimAngle = bestAngle
-
-        // 6. ENVIAR RESULTADOS AL LIENZO ESCALADOS SIN BLOQUEOS
+        // 5. ENVIAR RESULTADOS AL LIENZO ESCALADOS SIN BLOQUEOS
         val scaleX = if (billiardCanvasView.width > 0) billiardCanvasView.width.toFloat() / width.toFloat() else 1.0f
         val scaleY = if (billiardCanvasView.height > 0) billiardCanvasView.height.toFloat() / height.toFloat() else 1.0f
 
-        val scaledCueX = cueX * scaleX
-        val scaledCueY = cueY * scaleY
         val scaledBalls = balls.map { PointF(it.x * scaleX, it.y * scaleY) }
         val scaledFelt = RectF(feltLeft * scaleX, feltTop * scaleY, feltRight * scaleX, feltBottom * scaleY)
 
         billiardCanvasView.post {
             billiardCanvasView.updateDetectionFromBackground(
-                scaledCueX, scaledCueY, aimAngle, scaledBalls, scaledFelt
+                0f, 0f, 0f, scaledBalls, scaledFelt
             )
         }
     }
@@ -495,6 +460,36 @@ class OverlayService : Service() {
             setMargins(dpToPx(2), 0, dpToPx(2), 0)
         }
 
+        val btnAim = Button(this).apply {
+            text = "🎯 Tiro"
+            textSize = 10f
+            setTextColor(Color.parseColor("#00E5FF"))
+            background = createButtonDrawable(Color.argb(190, 10, 45, 65))
+            layoutParams = btnParams
+            setPadding(dpToPx(6), 0, dpToPx(6), 0)
+            setOnClickListener {
+                val isAiming = (billiardCanvasView.mode == BilliardCanvasView.Mode.ADJUST_AIM)
+                if (!isAiming) {
+                    setCanvasTouchable(true)
+                    billiardCanvasView.mode = BilliardCanvasView.Mode.ADJUST_AIM
+                    text = "🎮 Jugar"
+                    setTextColor(Color.parseColor("#00E676"))
+                    background = createButtonDrawable(Color.argb(220, 0, 70, 30))
+                    Toast.makeText(this@OverlayService, "Arrastra ⚪ Blanca, 🎯 Bola Objetivo o toca una tronera", Toast.LENGTH_SHORT).show()
+                } else {
+                    setCanvasTouchable(false)
+                    billiardCanvasView.mode = BilliardCanvasView.Mode.LOCKED_PLAY
+                    billiardCanvasView.saveBallPositions()
+                    text = "🎯 Tiro"
+                    setTextColor(Color.parseColor("#00E5FF"))
+                    background = createButtonDrawable(Color.argb(190, 10, 45, 65))
+                    toggleExpand(false)
+                    Toast.makeText(this@OverlayService, "🎯 Guías fijadas. ¡Listo para tirar!", Toast.LENGTH_SHORT).show()
+                }
+                billiardCanvasView.invalidate()
+            }
+        }
+
         val currentLabel = BilliardCanvasView.TargetLineColor.values()[billiardCanvasView.currentColorIndex].label
         val btnColor = Button(this).apply {
             text = "🎨 $currentLabel"
@@ -556,6 +551,7 @@ class OverlayService : Service() {
             setOnClickListener { stopSelf() }
         }
 
+        expandedBar.addView(btnAim)
         expandedBar.addView(btnColor)
         expandedBar.addView(btnMesa)
         expandedBar.addView(btnMinimize)
