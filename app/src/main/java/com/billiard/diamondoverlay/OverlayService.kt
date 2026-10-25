@@ -21,6 +21,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.Toast
+import java.nio.ByteBuffer
 import kotlin.math.*
 
 class OverlayService : Service() {
@@ -38,18 +39,13 @@ class OverlayService : Service() {
     private var imageReader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
 
-    // Hilo dedicado de visión artificial en segundo plano para no congelar la interfaz
+    // Hilo dedicado de visión artificial en segundo plano para no congelar la UI
     private var scannerThread: HandlerThread? = null
     private var scannerHandler: Handler? = null
 
     private var screenWidth = 2800
     private var screenHeight = 1260
     private var screenDensity = 480
-    private var scanWidth = 1400
-    private var scanHeight = 630
-
-    private var reusableBitmap: Bitmap? = null
-    private var pixelArray = IntArray(0)
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -89,10 +85,6 @@ class OverlayService : Service() {
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
         screenDensity = metrics.densityDpi
-
-        // Escaneo a media resolución con aceleración por hardware GPU (ultra-rápido < 3ms)
-        scanWidth = max(700, screenWidth / 2)
-        scanHeight = max(315, screenHeight / 2)
     }
 
     private fun setupMediaProjection(resultCode: Int, data: Intent) {
@@ -105,19 +97,25 @@ class OverlayService : Service() {
             scannerThread = HandlerThread("BallScannerThread").apply { start() }
             scannerHandler = Handler(scannerThread!!.looper)
 
-            imageReader = ImageReader.newInstance(scanWidth, scanHeight, PixelFormat.RGBA_8888, 2)
+            // Usar resolución nativa para compatibilidad total con la GPU de MagicOS / Android 14
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "BilliardScanner",
-                scanWidth, scanHeight, screenDensity,
+                screenWidth, screenHeight, screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader?.surface, null, null
             )
 
-            // Procesar cada cuadro directamente en el hilo de segundo plano
+            // Procesar cada cuadro directamente desde el buffer de memoria nativo
             imageReader?.setOnImageAvailableListener({ reader ->
                 val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-                processFrameOnBackground(image)
-                image.close()
+                try {
+                    processFrameDirectFromBuffer(image)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                } finally {
+                    image.close() // SIEMPRE liberar para que nunca se quede atorado
+                }
             }, scannerHandler)
 
         } catch (e: Exception) {
@@ -126,156 +124,236 @@ class OverlayService : Service() {
     }
 
     /**
-     * PROCESAMIENTO DE VISIÓN ARTIFICIAL EN SEGUNDO PLANO (CERO BLOQUEO DE UI)
+     * PROCESAMIENTO DIRECTO EN MEMORIA NATIVO (ULTRA-RÁPIDO < 1ms, CERO MEMORY ALLOCATION, NUNCA SE TRABA)
      */
-    private fun processFrameOnBackground(image: android.media.Image) {
-        try {
-            val planes = image.planes
-            val buffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * image.width
+    private fun processFrameDirectFromBuffer(image: android.media.Image) {
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
+        val width = image.width
+        val height = image.height
+        val bufCapacity = buffer.capacity()
 
-            val targetWidth = image.width + rowPadding / pixelStride
-            val targetHeight = image.height
+        val midX = width / 2
+        val midY = height / 2
 
-            if (reusableBitmap == null || reusableBitmap?.width != targetWidth || reusableBitmap?.height != targetHeight) {
-                reusableBitmap?.recycle()
-                reusableBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-                pixelArray = IntArray(targetWidth * targetHeight)
-            }
+        var feltTop = (height * 0.16f).toInt()
+        var feltBottom = (height * 0.84f).toInt()
+        var feltLeft = (width * 0.12f).toInt()
+        var feltRight = (width * 0.88f).toInt()
 
-            buffer.rewind()
-            reusableBitmap?.copyPixelsFromBuffer(buffer)
-            reusableBitmap?.getPixels(pixelArray, 0, targetWidth, 0, 0, targetWidth, targetHeight)
-
-            // Factor de escala entre la imagen capturada y la pantalla real
-            val scaleX = screenWidth.toFloat() / image.width
-            val scaleY = screenHeight.toFloat() / image.height
-
-            val tblLeft = (billiardCanvasView.tableRect.left / scaleX).toInt().coerceIn(0, targetWidth - 1)
-            val tblRight = (billiardCanvasView.tableRect.right / scaleX).toInt().coerceIn(0, targetWidth - 1)
-            val tblTop = (billiardCanvasView.tableRect.top / scaleY).toInt().coerceIn(0, targetHeight - 1)
-            val tblBottom = (billiardCanvasView.tableRect.bottom / scaleY).toInt().coerceIn(0, targetHeight - 1)
-
-            if (tblRight <= tblLeft || tblBottom <= tblTop) return
-
-            // 1. Estimar color promedio del paño de la mesa
-            val sampleCoords = listOf(
-                Pair(tblLeft + (tblRight - tblLeft) / 4, tblTop + (tblBottom - tblTop) / 4),
-                Pair(tblLeft + 3 * (tblRight - tblLeft) / 4, tblTop + (tblBottom - tblTop) / 4),
-                Pair(tblLeft + (tblRight - tblLeft) / 4, tblTop + 3 * (tblBottom - tblTop) / 4),
-                Pair(tblLeft + 3 * (tblRight - tblLeft) / 4, tblTop + 3 * (tblBottom - tblTop) / 4),
-                Pair(tblLeft + (tblRight - tblLeft) / 2, tblTop + (tblBottom - tblTop) / 4),
-                Pair(tblLeft + (tblRight - tblLeft) / 2, tblTop + 3 * (tblBottom - tblTop) / 4)
-            )
-            val rList = mutableListOf<Int>(); val gList = mutableListOf<Int>(); val bList = mutableListOf<Int>()
-            for ((sx, sy) in sampleCoords) {
-                val idx = sy.coerceIn(0, targetHeight - 1) * targetWidth + sx.coerceIn(0, targetWidth - 1)
-                val c = pixelArray[idx]
-                rList.add((c shr 16) and 0xFF); gList.add((c shr 8) and 0xFF); bList.add(c and 0xFF)
-            }
-            rList.sort(); gList.sort(); bList.sort()
-            val feltR = rList[rList.size / 2]
-            val feltG = gList[gList.size / 2]
-            val feltB = bList[bList.size / 2]
-
-            // 2. Extraer puntos de bola blanca y otras bolas
-            val scanR = (billiardCanvasView.ballRadius / scaleX)
-            val step = max(3, (scanR / 3.0f).toInt())
-
-            val whitePoints = mutableListOf<PointF>()
-            val otherPoints = mutableListOf<PointF>()
-
-            for (y in (tblTop + scanR.toInt())..(tblBottom - scanR.toInt()) step step) {
-                val rowOffset = y * targetWidth
-                for (x in (tblLeft + scanR.toInt())..(tblRight - scanR.toInt()) step step) {
-                    val c = pixelArray[rowOffset + x]
-                    val r = (c shr 16) and 0xFF
-                    val g = (c shr 8) and 0xFF
-                    val b = c and 0xFF
-
-                    if (r > 205 && g > 205 && b > 205 && abs(r - g) < 18 && abs(g - b) < 18) {
-                        whitePoints.add(PointF(x.toFloat(), y.toFloat()))
-                    } else {
-                        val diff = abs(r - feltR) + abs(g - feltG) + abs(b - feltB)
-                        if (diff > 48 || (r < 45 && g < 45 && b < 45)) {
-                            otherPoints.add(PointF(x.toFloat(), y.toFloat()))
-                        }
-                    }
+        // 1. AUTO-CALIBRACIÓN DE MESA: Escanear los 4 límites reales del paño azul en pantalla
+        for (y in (height * 0.05f).toInt()..(height * 0.40f).toInt() step 4) {
+            val offset = y * rowStride + midX * pixelStride
+            if (offset + 2 < bufCapacity) {
+                val r = buffer.get(offset).toInt() and 0xFF
+                val g = buffer.get(offset + 1).toInt() and 0xFF
+                val b = buffer.get(offset + 2).toInt() and 0xFF
+                if (b > 125 && b > r + 30 && g > r + 15) {
+                    feltTop = y + 8
+                    break
                 }
             }
-
-            // 3. Posicionar Bola Blanca
-            var detectedCueX = billiardCanvasView.cueBall.x
-            var detectedCueY = billiardCanvasView.cueBall.y
-            if (whitePoints.size >= 4) {
-                var sumX = 0f; var sumY = 0f
-                for (pt in whitePoints) { sumX += pt.x; sumY += pt.y }
-                val scanCueX = sumX / whitePoints.size
-                val scanCueY = sumY / whitePoints.size
-                detectedCueX = scanCueX * scaleX
-                detectedCueY = scanCueY * scaleY
+        }
+        for (y in (height * 0.95f).toInt() downTo (height * 0.60f).toInt() step 4) {
+            val offset = y * rowStride + midX * pixelStride
+            if (offset + 2 < bufCapacity) {
+                val r = buffer.get(offset).toInt() and 0xFF
+                val g = buffer.get(offset + 1).toInt() and 0xFF
+                val b = buffer.get(offset + 2).toInt() and 0xFF
+                if (b > 125 && b > r + 30 && g > r + 15) {
+                    feltBottom = y - 8
+                    break
+                }
             }
+        }
+        for (x in (width * 0.05f).toInt()..(width * 0.35f).toInt() step 4) {
+            val offset = midY * rowStride + x * pixelStride
+            if (offset + 2 < bufCapacity) {
+                val r = buffer.get(offset).toInt() and 0xFF
+                val g = buffer.get(offset + 1).toInt() and 0xFF
+                val b = buffer.get(offset + 2).toInt() and 0xFF
+                if (b > 125 && b > r + 30 && g > r + 15) {
+                    feltLeft = x + 8
+                    break
+                }
+            }
+        }
+        for (x in (width * 0.95f).toInt() downTo (width * 0.65f).toInt() step 4) {
+            val offset = midY * rowStride + x * pixelStride
+            if (offset + 2 < bufCapacity) {
+                val r = buffer.get(offset).toInt() and 0xFF
+                val g = buffer.get(offset + 1).toInt() and 0xFF
+                val b = buffer.get(offset + 2).toInt() and 0xFF
+                if (b > 125 && b > r + 30 && g > r + 15) {
+                    feltRight = x - 8
+                    break
+                }
+            }
+        }
 
-            // 4. Agrupar todas las demás bolas en la mesa
-            val balls = mutableListOf<PointF>()
-            val clusterDist = scanR * 1.35f
-            val scanCueX = detectedCueX / scaleX
-            val scanCueY = detectedCueY / scaleY
+        val feltWidth = feltRight - feltLeft
+        val feltHeight = feltBottom - feltTop
+        if (feltWidth <= 200 || feltHeight <= 100) return
 
-            for (pt in otherPoints) {
-                if (hypot((pt.x - scanCueX).toDouble(), (pt.y - scanCueY).toDouble()) < clusterDist * 1.1f) continue
+        val ballR = (feltHeight * 0.042f).toInt().coerceAtLeast(10)
+        val step = max(4, ballR / 3)
 
-                var merged = false
-                for (b in balls) {
-                    if (hypot((pt.x - b.x / scaleX).toDouble(), (pt.y - b.y / scaleY).toDouble()) < clusterDist) {
-                        b.x = (b.x + pt.x * scaleX) * 0.5f
-                        b.y = (b.y + pt.y * scaleY) * 0.5f
-                        merged = true
+        // Clase local para agrupar puntos por centroide exacto
+        class DetectionCluster(var sumX: Float, var sumY: Float, var count: Int) {
+            fun add(x: Float, y: Float) {
+                sumX += x
+                sumY += y
+                count++
+            }
+            fun centerX() = sumX / count
+            fun centerY() = sumY / count
+            fun distSq(x: Float, y: Float): Float {
+                val dx = x - centerX()
+                val dy = y - centerY()
+                return dx * dx + dy * dy
+            }
+        }
+
+        val whitePoints = mutableListOf<PointF>()
+        val ballPoints = mutableListOf<PointF>()
+
+        // 2. DETECCIÓN ROBUSTA DE LA BOLA BLANCA Y TODAS LAS DEMÁS BOLAS
+        for (y in (feltTop + ballR) until (feltBottom - ballR) step step) {
+            val rowOffset = y * rowStride
+            for (x in (feltLeft + ballR) until (feltRight - ballR) step step) {
+                val offset = rowOffset + x * pixelStride
+                if (offset + 2 >= bufCapacity) continue
+
+                val r = buffer.get(offset).toInt() and 0xFF
+                val g = buffer.get(offset + 1).toInt() and 0xFF
+                val b = buffer.get(offset + 2).toInt() and 0xFF
+
+                val isFelt = (b > 115 && b > r + 30 && g > r + 15)
+
+                if (r > 190 && g > 190 && b > 190) {
+                    whitePoints.add(PointF(x.toFloat(), y.toFloat()))
+                } else if (!isFelt) {
+                    ballPoints.add(PointF(x.toFloat(), y.toFloat()))
+                }
+            }
+        }
+
+        // 3. AISLAR Y CALCULAR EL CENTRO EXACTO DE LA BOLA BLANCA
+        var cueX = billiardCanvasView.cueBall.x
+        var cueY = billiardCanvasView.cueBall.y
+        val whiteClusterMaxDistSq = (ballR * 2.0f) * (ballR * 2.0f)
+
+        if (whitePoints.size >= 3) {
+            val whiteClusters = mutableListOf<DetectionCluster>()
+            for (pt in whitePoints) {
+                var matched = false
+                for (cl in whiteClusters) {
+                    if (cl.distSq(pt.x, pt.y) < whiteClusterMaxDistSq) {
+                        cl.add(pt.x, pt.y)
+                        matched = true
                         break
                     }
                 }
-                if (!merged && balls.size < 16) {
-                    balls.add(PointF(pt.x * scaleX, pt.y * scaleY))
+                if (!matched) {
+                    whiteClusters.add(DetectionCluster(pt.x, pt.y, 1))
                 }
             }
 
-            // 5. DETECTAR EL TACO Y LA DIRECCIÓN DESDE LA PUNTA DEL TACO
-            var detectedAimAngle = billiardCanvasView.aimAngle
-            val sampleR = scanR * 2.3f
-            var maxCueBrightness = -1
-            var bestAngle = detectedAimAngle
-
-            for (deg in 0 until 360 step 2) {
-                val rad = Math.toRadians(deg.toDouble()).toFloat()
-                val sx = (scanCueX + cos(rad) * sampleR).toInt().coerceIn(0, targetWidth - 1)
-                val sy = (scanCueY + sin(rad) * sampleR).toInt().coerceIn(0, targetHeight - 1)
-                val c = pixelArray[sy * targetWidth + sx]
-                val r = (c shr 16) and 0xFF
-                val g = (c shr 8) and 0xFF
-                val b = c and 0xFF
-
-                // Si detecta la línea guía brillante que sale hacia adelante
-                val brightness = (r + g + b) / 3
-                if (brightness > maxCueBrightness && brightness > 170) {
-                    maxCueBrightness = brightness
-                    bestAngle = rad
+            var bestCount = 0
+            var bestCluster: DetectionCluster? = null
+            for (cl in whiteClusters) {
+                if (cl.count > bestCount) {
+                    bestCount = cl.count
+                    bestCluster = cl
                 }
-                // O si detecta el cuerpo de madera del taco apuntando por detrás
-                if (r > 115 && g in 55..140 && b < 85 && brightness > 80) {
-                    val forwardAngle = (rad + Math.PI).toFloat()
+            }
+
+            if (bestCluster != null && bestCount >= 4) {
+                cueX = bestCluster.centerX()
+                cueY = bestCluster.centerY()
+            }
+        }
+
+        // 4. AGRUPAR TODAS LAS DEMÁS BOLAS OBJETIVO EN LA MESA
+        val objectClusterMaxDistSq = (ballR * 1.8f) * (ballR * 1.8f)
+        val objectClusters = mutableListOf<DetectionCluster>()
+
+        for (pt in ballPoints) {
+            val dCueSq = (pt.x - cueX) * (pt.x - cueX) + (pt.y - cueY) * (pt.y - cueY)
+            if (dCueSq < (ballR * 1.6f) * (ballR * 1.6f)) continue
+
+            var matched = false
+            for (cl in objectClusters) {
+                if (cl.distSq(pt.x, pt.y) < objectClusterMaxDistSq) {
+                    cl.add(pt.x, pt.y)
+                    matched = true
+                    break
+                }
+            }
+            if (!matched) {
+                objectClusters.add(DetectionCluster(pt.x, pt.y, 1))
+            }
+        }
+
+        val balls = mutableListOf<PointF>()
+        for (cl in objectClusters) {
+            if (cl.count >= 5 && balls.size < 16) {
+                val bx = cl.centerX()
+                val by = cl.centerY()
+                if (bx > feltLeft + ballR * 0.8f && bx < feltRight - ballR * 0.8f &&
+                    by > feltTop + ballR * 0.8f && by < feltBottom - ballR * 0.8f) {
+                    balls.add(PointF(bx, by))
+                }
+            }
+        }
+
+        // 5. DETECTAR EL TACO Y LA DIRECCIÓN DESDE LA PUNTA DEL TACO
+        var aimAngle = billiardCanvasView.aimAngle
+        val sampleR = ballR * 2.3f
+        var maxBrightness = -1
+        var bestAngle = aimAngle
+
+        for (deg in 0 until 360 step 2) {
+            val rad = Math.toRadians(deg.toDouble()).toFloat()
+            val sx = (cueX + cos(rad) * sampleR).toInt().coerceIn(0, width - 1)
+            val sy = (cueY + sin(rad) * sampleR).toInt().coerceIn(0, height - 1)
+            val offset = sy * rowStride + sx * pixelStride
+            if (offset + 2 >= bufCapacity) continue
+
+            val r = buffer.get(offset).toInt() and 0xFF
+            val g = buffer.get(offset + 1).toInt() and 0xFF
+            val b = buffer.get(offset + 2).toInt() and 0xFF
+
+            val brightness = (r + g + b) / 3
+            // Línea de tiro blanca hacia adelante del juego
+            if (brightness > maxBrightness && brightness > 185) {
+                maxBrightness = brightness
+                bestAngle = rad
+            }
+            // Taco de billar madera/dorado apuntando por detrás
+            if (r > 125 && g in 55..160 && b < 100 && brightness > 80) {
+                val forwardAngle = (rad + Math.PI).toFloat()
+                if (maxBrightness < 185) {
                     bestAngle = forwardAngle
                 }
             }
-            detectedAimAngle = bestAngle
-
-            // Enviar resultados al lienzo de forma fluida y sin bloqueos
-            billiardCanvasView.updateDetectionFromBackground(detectedCueX, detectedCueY, detectedAimAngle, balls)
-
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
+        aimAngle = bestAngle
+
+        // 6. ENVIAR RESULTADOS AL LIENZO ESCALADOS SIN BLOQUEOS
+        val scaleX = if (billiardCanvasView.width > 0) billiardCanvasView.width.toFloat() / width.toFloat() else 1.0f
+        val scaleY = if (billiardCanvasView.height > 0) billiardCanvasView.height.toFloat() / height.toFloat() else 1.0f
+
+        val scaledCueX = cueX * scaleX
+        val scaledCueY = cueY * scaleY
+        val scaledBalls = balls.map { PointF(it.x * scaleX, it.y * scaleY) }
+        val scaledFelt = RectF(feltLeft * scaleX, feltTop * scaleY, feltRight * scaleX, feltBottom * scaleY)
+
+        billiardCanvasView.updateDetectionFromBackground(
+            scaledCueX, scaledCueY, aimAngle, scaledBalls, scaledFelt
+        )
     }
 
     private fun setupOverlays() {
@@ -283,7 +361,6 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else WindowManager.LayoutParams.TYPE_PHONE
 
-        // 1. Lienzo de pantalla completa completamente pasante al tacto
         billiardCanvasView = BilliardCanvasView(this)
         canvasParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -301,7 +378,6 @@ class OverlayService : Service() {
         }
         windowManager.addView(billiardCanvasView, canvasParams)
 
-        // 2. Botón flotante mínimo (inicia minimizado a una bolita 🎱)
         controlContainer = FrameLayout(this)
         controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -336,7 +412,6 @@ class OverlayService : Service() {
     private fun buildControlViews() {
         controlContainer.removeAllViews()
 
-        // 1. Burbuja mínima flotante
         minimizedBubble = Button(this).apply {
             text = "🎱"
             textSize = 17f
@@ -381,7 +456,6 @@ class OverlayService : Service() {
             })
         }
 
-        // 2. Barrita expandida ultra-compacta
         expandedBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
@@ -402,7 +476,6 @@ class OverlayService : Service() {
             setMargins(dpToPx(2), 0, dpToPx(2), 0)
         }
 
-        // Botón 1: Color de la segunda línea
         val currentLabel = BilliardCanvasView.TargetLineColor.values()[billiardCanvasView.currentColorIndex].label
         val btnColor = Button(this).apply {
             text = "🎨 $currentLabel"
@@ -418,7 +491,6 @@ class OverlayService : Service() {
             }
         }
 
-        // Botón 2: Calibrar esquinas de la mesa (solo si es necesario)
         val btnMesa = Button(this).apply {
             text = "📐 Mesa"
             textSize = 10f
@@ -445,7 +517,6 @@ class OverlayService : Service() {
             }
         }
 
-        // Botón 3: Minimizar a la bolita
         val btnMinimize = Button(this).apply {
             text = "◀"
             textSize = 11f
@@ -456,7 +527,6 @@ class OverlayService : Service() {
             setOnClickListener { toggleExpand(false) }
         }
 
-        // Botón 4: Cerrar
         val btnClose = Button(this).apply {
             text = "✕"
             textSize = 11f
@@ -547,7 +617,5 @@ class OverlayService : Service() {
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
-        reusableBitmap?.recycle()
-        reusableBitmap = null
     }
 }

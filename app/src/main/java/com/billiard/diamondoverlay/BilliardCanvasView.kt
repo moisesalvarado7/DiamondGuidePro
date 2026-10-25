@@ -174,14 +174,35 @@ class BilliardCanvasView(context: Context) : View(context) {
     /**
      * Actualiza la detección de visión proveniente del hilo en segundo plano (sin bloquear la UI)
      */
-    fun updateDetectionFromBackground(cueX: Float, cueY: Float, angle: Float, balls: List<PointF>) {
-        // Suavizado de posición de bola blanca
-        cueBall.x = cueBall.x * 0.25f + cueX * 0.75f
-        cueBall.y = cueBall.y * 0.25f + cueY * 0.75f
+    fun updateDetectionFromBackground(
+        cueX: Float,
+        cueY: Float,
+        angle: Float,
+        balls: List<PointF>,
+        detectedFelt: RectF? = null
+    ) {
+        // Si es la primera detección o las coordenadas estaban en default, saltar inmediatamente
+        if (cueBall.x == 700f && cueBall.y == 650f) {
+            cueBall.x = cueX
+            cueBall.y = cueY
+            aimAngle = angle
+        } else {
+            // Suavizado suave de posición de bola blanca
+            cueBall.x = cueBall.x * 0.25f + cueX * 0.75f
+            cueBall.y = cueBall.y * 0.25f + cueY * 0.75f
 
-        // Suavizado del ángulo del taco
-        val angleDiff = atan2(sin(angle - aimAngle), cos(angle - aimAngle))
-        aimAngle += (angleDiff * 0.65f)
+            // Suavizado del ángulo del taco
+            val angleDiff = atan2(sin(angle - aimAngle), cos(angle - aimAngle))
+            aimAngle += (angleDiff * 0.70f)
+        }
+
+        // Calibración automática del tapete
+        if (detectedFelt != null && detectedFelt.width() > 400f && detectedFelt.height() > 200f) {
+            if (tableRect.left == 260f || abs(tableRect.left - detectedFelt.left) > 40f) {
+                tableRect.set(detectedFelt)
+                ballRadius = tableRect.height() * 0.042f
+            }
+        }
 
         detectedBalls.clear()
         detectedBalls.addAll(balls)
