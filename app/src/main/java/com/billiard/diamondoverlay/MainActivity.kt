@@ -33,7 +33,7 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "🎱 Diamond Guide Pro"
+            text = "🎱 Aim Guide Pro"
             textSize = 24f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -41,7 +41,7 @@ class MainActivity : Activity() {
         }
 
         val subtitle = TextView(this).apply {
-            text = "Guías de Diamantes y Rebotes para 8 Ball Pool\n(Mismo color = Líneas paralelas de rebote)"
+            text = "Líneas de Referencia y Rebotes para 8 Ball Pool\n(Blanca = Bola blanca | Color = Bola a anotar)"
             textSize = 13f
             setTextColor(Color.parseColor("#90CAF9"))
             gravity = Gravity.CENTER
@@ -50,7 +50,7 @@ class MainActivity : Activity() {
 
         // Botón principal: Inicia las guías de inmediato sin diálogos molestos
         val btnStartDirect = Button(this).apply {
-            text = "🟢 Activar Guías de Diamantes\n(Superponer directamente en tu juego)"
+            text = "🟢 Activar Líneas de Referencia\n(Superponer directamente en tu juego)"
             textSize = 15f
             setBackgroundColor(Color.parseColor("#00E676"))
             setTextColor(Color.BLACK)
@@ -88,10 +88,10 @@ class MainActivity : Activity() {
 
         val instructions = TextView(this).apply {
             text = "💡 Cómo usar:\n" +
-                    "1. Toca 'Activar Guías' y abre 8 Ball Pool.\n" +
-                    "2. En la barra flotante toca '📐 Mesa' para arrastrar las esquinas al tapete del juego.\n" +
-                    "3. Toca '🎮 Jugar' para bloquear las guías y disparar a través de ellas.\n" +
-                    "4. Toca '💎 Guías' para alternar entre todas las líneas o las clave."
+                    "1. Toca 'Activar Líneas' y abre 8 Ball Pool.\n" +
+                    "2. En la barra flotante toca '🎯 Mover' para arrastrar la blanca y la bola a anotar donde desees.\n" +
+                    "3. Toca '🎨 Color' para cambiar el color de rebote (Negro, Oro, Cyan, Verde, Rojo).\n" +
+                    "4. Toca '🎮 Jugar' para bloquear las líneas y jugar libremente."
             textSize = 12f
             setTextColor(Color.parseColor("#B0BEC5"))
             setPadding(10, 30, 10, 0)
