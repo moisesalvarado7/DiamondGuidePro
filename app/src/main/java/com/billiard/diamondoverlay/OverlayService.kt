@@ -262,6 +262,29 @@ class OverlayService : Service() {
             }
         }
 
+        // Botón Alternar entre Tiro Directo y Tiro de Banda (Bank Shot)
+        val btnBank = Button(this).apply {
+            text = "🔄 Banda"
+            textSize = 10f
+            setTextColor(Color.parseColor("#FFD600"))
+            background = createButtonDrawable(Color.argb(160, 60, 45, 10))
+            layoutParams = btnParams
+            setPadding(dpToPx(7), 0, dpToPx(7), 0)
+            setOnClickListener {
+                billiardCanvasView.isBankShotMode = !billiardCanvasView.isBankShotMode
+                if (billiardCanvasView.isBankShotMode) {
+                    text = "🎯 Directo"
+                    setTextColor(Color.parseColor("#00E676"))
+                    Toast.makeText(this@OverlayService, "Modo Rebote en Banda ACTIVO", Toast.LENGTH_SHORT).show()
+                } else {
+                    text = "🔄 Banda"
+                    setTextColor(Color.parseColor("#FFD600"))
+                    Toast.makeText(this@OverlayService, "Modo Tiro Directo ACTIVO", Toast.LENGTH_SHORT).show()
+                }
+                billiardCanvasView.invalidate()
+            }
+        }
+
         // Botón 2: Alternar Cuadrícula de Guías de Diamantes
         val btnGrid = Button(this).apply {
             text = "💎 Guías"
@@ -394,6 +417,7 @@ class OverlayService : Service() {
 
         expandedBar.addView(btnDrag)
         expandedBar.addView(btnAim)
+        expandedBar.addView(btnBank)
         expandedBar.addView(btnGrid)
         expandedBar.addView(btnResize)
         expandedBar.addView(btnCalib)
